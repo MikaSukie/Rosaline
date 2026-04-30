@@ -96,16 +96,23 @@ std::string CodeGen::zeroVal(const ResolvedTyPtr& ty) const {
     switch (ty->kind) {
     case TyKind::Void:   return "undef";
     case TyKind::Bool:   return "false";
-    case TyKind::I8: case TyKind::I16: case TyKind::I32: case TyKind::I64:
-    case TyKind::U8: case TyKind::U16: case TyKind::U32: case TyKind::U64:
+    case TyKind::I8:
+    case TyKind::I16:
+    case TyKind::I32:
+    case TyKind::I64:
+    case TyKind::U8:
+    case TyKind::U16:
+    case TyKind::U32:
+    case TyKind::U64:
     case TyKind::Char:   return "0";
-    case TyKind::F32: case TyKind::F64: return "0.0";
+    case TyKind::F32:
+    case TyKind::F64:    return "0.0";
     case TyKind::Str:    return "null";
     case TyKind::Ptr:    return "null";
     case TyKind::Array:  return "zeroinitializer";
     case TyKind::Struct: return "zeroinitializer";
     case TyKind::Enum:   return "zeroinitializer";
-    case TyKind::Opaque:  return "undef";
+    case TyKind::Opaque: return "undef";
     default: return "0";
     }
 }

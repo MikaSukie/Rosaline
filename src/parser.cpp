@@ -427,20 +427,20 @@ TypeNodePtr Parser::parseBaseType() {
     };
 
     switch (cur().kind) {
-        case TK::I8:   makePrim(PrimKind::I8);   break;
-        case TK::I16:  makePrim(PrimKind::I16);  break;
-        case TK::I32:  makePrim(PrimKind::I32);  break;
-        case TK::I64:  makePrim(PrimKind::I64);  break;
-        case TK::U8:   makePrim(PrimKind::U8);   break;
-        case TK::U16:  makePrim(PrimKind::U16);  break;
-        case TK::U32:  makePrim(PrimKind::U32);  break;
-        case TK::U64:  makePrim(PrimKind::U64);  break;
-        case TK::Bool: makePrim(PrimKind::Bool); break;
-        case TK::Char: makePrim(PrimKind::Char); break;
-        case TK::Str:  makePrim(PrimKind::Str);  break;
-        case TK::F32:  makePrim(PrimKind::F32);  break;
-        case TK::F64:  makePrim(PrimKind::F64);  break;
-        case TK::Void: makePrim(PrimKind::Void); break;
+        case TK::I8:   makePrim(PrimKind::I8);       break;
+        case TK::I16:  makePrim(PrimKind::I16);      break;
+        case TK::I32:  makePrim(PrimKind::I32);      break;
+        case TK::I64:  makePrim(PrimKind::I64);      break;
+        case TK::U8:   makePrim(PrimKind::U8);       break;
+        case TK::U16:  makePrim(PrimKind::U16);      break;
+        case TK::U32:  makePrim(PrimKind::U32);      break;
+        case TK::U64:  makePrim(PrimKind::U64);      break;
+        case TK::Bool: makePrim(PrimKind::Bool);     break;
+        case TK::Char: makePrim(PrimKind::Char);     break;
+        case TK::Str:  makePrim(PrimKind::Str);      break;
+        case TK::F32:  makePrim(PrimKind::F32);      break;
+        case TK::F64:  makePrim(PrimKind::F64);      break;
+        case TK::Void: makePrim(PrimKind::Void);     break;
         case TK::Hash: consume(); t->v = HashType{}; break;
         case TK::Ident: {
             NamedType nt;
@@ -657,7 +657,7 @@ StmtPtr Parser::parseReturn() {
 ExprPtr Parser::parseExpr() { return parseAssign(); }
 
 static bool isAssignOp(TK k) {
-    return k == TK::Assign || k == TK::PlusAssign || k == TK::MinusAssign
+    return k == TK::Assign || k == TK::PlusAssign  || k == TK::MinusAssign
     || k == TK::StarAssign || k == TK::SlashAssign || k == TK::PercentAssign
     || k == TK::AmpAssign  || k == TK::PipeAssign  || k == TK::CaretAssign
     || k == TK::LshiftAssign || k == TK::RshiftAssign;

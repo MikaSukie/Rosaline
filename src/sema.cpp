@@ -1518,10 +1518,10 @@ void SemaPass::ownerReadonly(const std::string& varName, Scope& scope,
     }
 
     HandleInfo h;
-    h.varName   = varName;
-    h.isMutable = false;
-    h.generation = v->generation;
-    h.createdAt  = loc;
+    h.varName     = varName;
+    h.isMutable   = false;
+    h.generation  = v->generation;
+    h.createdAt   = loc;
     handles.push_back(h);
 }
 
@@ -1563,8 +1563,8 @@ void SemaPass::ownerTake(const std::string& varName, Scope& scope,
     v->ownerState = VarInfo::OwnerState::Mutable;
 
     HandleInfo h;
-    h.varName   = varName;
-    h.isMutable = true;
+    h.varName    = varName;
+    h.isMutable  = true;
     h.generation = v->generation;
     h.createdAt  = loc;
     handles.push_back(h);

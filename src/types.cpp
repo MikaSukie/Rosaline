@@ -109,10 +109,15 @@ std::string ResolvedTy::llvmType() const {
     switch (kind) {
         case TyKind::Void:    return "void";
         case TyKind::Bool:    return "i1";
-        case TyKind::I8:  case TyKind::U8:  case TyKind::Char: return "i8";
-        case TyKind::I16: case TyKind::U16: return "i16";
-        case TyKind::I32: case TyKind::U32: return "i32";
-        case TyKind::I64: case TyKind::U64: return "i64";
+        case TyKind::I8:
+        case TyKind::U8:
+        case TyKind::Char:    return "i8";
+        case TyKind::I16:
+        case TyKind::U16:     return "i16";
+        case TyKind::I32:
+        case TyKind::U32:     return "i32";
+        case TyKind::I64:
+        case TyKind::U64:     return "i64";
         case TyKind::F32:     return "float";
         case TyKind::F64:     return "double";
         case TyKind::Str:     return "ptr";

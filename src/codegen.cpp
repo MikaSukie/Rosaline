@@ -585,7 +585,7 @@ void CodeGen::emitStringConst(const std::string& val, const std::string& symName
 std::string CodeGen::emitOwnedStrCopy(const std::string& src) {
     if (src == "null") return "null";
 
-    std::string isNull = newTmp();
+    std::string isNull  = newTmp();
     std::string nullLbl = newLabel();
     std::string copyLbl = newLabel();
     std::string endLbl  = newLabel();

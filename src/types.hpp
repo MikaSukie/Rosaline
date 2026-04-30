@@ -47,23 +47,23 @@ struct ResolvedTy {
                kind == TyKind::U32 || kind == TyKind::U64;
     }
     bool isFloat()  const { return kind == TyKind::F32 || kind == TyKind::F64; }
-    bool isVoid()   const { return kind == TyKind::Void; }
-    bool isStr()    const { return kind == TyKind::Str; }
-    bool isPtr()    const { return kind == TyKind::Ptr; }
-    bool isArray()  const { return kind == TyKind::Array; }
-    bool isStruct() const { return kind == TyKind::Struct; }
-    bool isEnum()   const { return kind == TyKind::Enum; }
-    bool isOpaque() const { return kind == TyKind::Opaque; }
+    bool isVoid()   const { return kind == TyKind::Void;    }
+    bool isStr()    const { return kind == TyKind::Str;     }
+    bool isPtr()    const { return kind == TyKind::Ptr;     }
+    bool isArray()  const { return kind == TyKind::Array;   }
+    bool isStruct() const { return kind == TyKind::Struct;  }
+    bool isEnum()   const { return kind == TyKind::Enum;    }
+    bool isOpaque() const { return kind == TyKind::Opaque;  }
     bool isGeneric()const { return kind == TyKind::Generic; }
-    bool isError()  const { return kind == TyKind::Error; }
-    bool isNumeric()const { return isInteger() || isFloat(); }
+    bool isError()  const { return kind == TyKind::Error;   }
+    bool isNumeric()const { return isInteger() || isFloat();}
 
     int bitWidth() const {
         switch (kind) {
-        case TyKind::I8: case TyKind::U8: case TyKind::Char:  return 8;
+        case TyKind::I8: case TyKind::U8: case TyKind::Char:   return 8;
         case TyKind::I16: case TyKind::U16:                    return 16;
-        case TyKind::Bool:                                      return 1;
-    case TyKind::I32: case TyKind::U32:                    return 32;
+        case TyKind::Bool:                                     return 1;
+        case TyKind::I32: case TyKind::U32:                    return 32;
         case TyKind::I64: case TyKind::U64:                    return 64;
         default: return 0;
         }

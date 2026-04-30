@@ -28,17 +28,17 @@ struct TypeNode {
     SourceLoc loc;
     std::variant<PrimType, NamedType, PtrType, ArrayType, HashType> v;
 
-    bool isPrim() const   { return std::holds_alternative<PrimType>(v); }
+    bool isPrim() const   { return std::holds_alternative<PrimType>(v);  }
     bool isNamed() const  { return std::holds_alternative<NamedType>(v); }
-    bool isPtr() const    { return std::holds_alternative<PtrType>(v); }
+    bool isPtr() const    { return std::holds_alternative<PtrType>(v);   }
     bool isArray() const  { return std::holds_alternative<ArrayType>(v); }
-    bool isHash() const   { return std::holds_alternative<HashType>(v); }
+    bool isHash() const   { return std::holds_alternative<HashType>(v);  }
     bool isVoid() const   { return isPrim() && std::get<PrimType>(v).kind == PrimKind::Void; }
 
     const PrimType&  asPrim()  const { return std::get<PrimType>(v); }
-    const NamedType& asNamed() const { return std::get<NamedType>(v); }
-    const PtrType&   asPtr()   const { return std::get<PtrType>(v); }
-    const ArrayType& asArray() const { return std::get<ArrayType>(v); }
+    const NamedType& asNamed() const { return std::get<NamedType>(v);}
+    const PtrType&   asPtr()   const { return std::get<PtrType>(v);  }
+    const ArrayType& asArray() const { return std::get<ArrayType>(v);}
 
     TypeNodePtr clone() const;
 
@@ -298,7 +298,7 @@ struct Program {
     std::vector<std::unique_ptr<OpaqueDecl>>    opaques;
     std::vector<std::unique_ptr<StructDecl>>    structs;
     std::vector<std::unique_ptr<EnumDecl>>      enums;
-    std::vector<std::unique_ptr<ExternDecl>> externs;
+    std::vector<std::unique_ptr<ExternDecl>>    externs;
     std::vector<std::unique_ptr<FuncDecl>>      funcs;
     std::vector<std::unique_ptr<GlobalDecl>>    globals;
     std::vector<Insertion>                      insertions;
