@@ -137,7 +137,7 @@ void SemaPass::resolveStructFields() {
             if (containsIllegalStorageType(ft)) {
                 diag_.error(f.loc,
                     std::format("field '{}' of struct '{}' has an illegal storage type '{}'; "
-                                "void and opaque types cannot be stored directly – use a pointer",
+                                "void and opaque types cannot be stored directly - use a pointer",
                                 f.name, sd->name, ft ? ft->str() : "?"),
                     lineFor(f.loc));
             }
@@ -193,7 +193,7 @@ void SemaPass::resolveEnumPayloads() {
                 if (containsIllegalStorageType(rty)) {
                     diag_.error(pt->loc,
                         std::format("payload type '{}' in variant '{}::{}' is illegal; "
-                                    "void and opaque types cannot be stored directly – use a pointer",
+                                    "void and opaque types cannot be stored directly - use a pointer",
                                     rty ? rty->str() : "?", ed->name, v.name),
                         lineFor(pt->loc));
                 }
