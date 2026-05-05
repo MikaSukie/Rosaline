@@ -542,10 +542,13 @@ void SemaPass::checkFunc(FuncDecl& fd, const SubstMap& subst) {
     }
 
     ResolvedTyPtr retTy;
-    if (fd.retType)
+    if (fd.isMain) {
+        retTy = Ty::I32();
+    } else if (fd.retType) {
         retTy = resolveType(*fd.retType, subst);
-    else
+    } else {
         retTy = Ty::Void();
+    }
 
     currentRetTy_ = retTy;
 
@@ -561,6 +564,14 @@ void SemaPass::checkFunc(FuncDecl& fd, const SubstMap& subst) {
     }
 
     crumbleCheckUnderuse(fd.loc);
+
+    if (!retTy->isVoid() && !hasReturn && !fd.genericParams.empty() == false) {
+        diag_.warning(fd.loc,
+            std::format("function '{}' returns '{}' but has no guaranteed return statement; "
+                        "falling through will produce a zero/null value",
+                        fd.name, retTy->str()),
+            lineFor(fd.loc));
+    }
 
     scope.pop();
 }

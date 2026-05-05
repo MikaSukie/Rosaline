@@ -1013,7 +1013,16 @@ void CodeGen::emitWhile(const WhileStmt& s) {
 }
 
 void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
-    if (!s.value || retTy->isVoid()) {
+    if (!s.value) {
+        emitAllDropsExcept();
+        if (!retTy->isVoid() && curSretPtr_.empty())
+            line("  ret " + llvmTy(retTy) + " " + zeroVal(retTy));
+        else
+            line("  ret void");
+        return;
+    }
+    if (retTy->isVoid()) {
+        emitExpr(*s.value);
         emitAllDropsExcept();
         line("  ret void");
         return;
