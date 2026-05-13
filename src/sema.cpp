@@ -204,6 +204,10 @@ void SemaPass::resolveEnumPayloads() {
 }
 
 void SemaPass::collectFuncs() {
+    static const std::unordered_set<std::string> kBuiltinNames = {
+        "strlen", "malloc", "free", "strcat", "strcpy", "memcpy"
+    };
+
     auto addBuiltin = [&](const std::string& name,
                           std::vector<ResolvedTyPtr> paramTys,
                           ResolvedTyPtr retTy,
@@ -225,14 +229,28 @@ void SemaPass::collectFuncs() {
     addBuiltin("strcpy", {Ty::Str(), Ty::Str()},   Ty::Str());
     addBuiltin("memcpy", {Ty::Ptr(Ty::Void()), Ty::Ptr(Ty::Void()), Ty::I64()}, Ty::Ptr(Ty::Void()));
 
+    std::unordered_map<std::string, SourceLoc> externDeclLocs;
+
     for (auto& ed : prog_.externs) {
         if (ed->isGlobal) continue;
         if (funcs_.count(ed->name)) {
-            diag_.error(ed->loc,
-                std::format("'{}' is a compiler builtin and cannot be redeclared", ed->name),
-                lineFor(ed->loc));
+            if (kBuiltinNames.count(ed->name)) {
+                diag_.error(ed->loc,
+                    std::format("'{}' is a compiler builtin and cannot be redeclared", ed->name),
+                    lineFor(ed->loc));
+            } else {
+                diag_.error(ed->loc,
+                    std::format("'{}' has already been declared", ed->name),
+                    lineFor(ed->loc));
+                auto it = externDeclLocs.find(ed->name);
+                if (it != externDeclLocs.end())
+                    diag_.note(it->second,
+                        std::format("'{}' first declared here", ed->name),
+                        lineFor(it->second));
+            }
             continue;
         }
+        externDeclLocs[ed->name] = ed->loc;
         FuncSig sig;
         sig.name       = ed->name;
         sig.isExtern   = true;
