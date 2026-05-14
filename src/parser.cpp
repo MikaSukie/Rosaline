@@ -835,7 +835,7 @@ ExprPtr Parser::parseUnary() {
                 diag_.hasErrors = savedHasErrors;
                 goto not_cast;
             }
-            if (check(TK::Rparen)) {
+            if (diag_.diags.size() == savedDiagCount && check(TK::Rparen)) {
                 consume();
                 auto operand = parseUnary();
                 auto e = std::make_unique<Expr>();

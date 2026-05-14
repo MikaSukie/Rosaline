@@ -1,4 +1,5 @@
 #include "codegen.hpp"
+#include <cstring>
 
 void CodeGen::line(const std::string& s) {
     if (!s.empty() && s[0] != ' ' && s[0] != '\t' && s.back() == ':') {
@@ -76,7 +77,21 @@ static int validAlign(int byteSize, bool packed = false) {
     return a;
 }
 
+static std::string formatLLVMFloat(double v, bool asFloat32) {
+    double d = asFloat32 ? static_cast<double>(static_cast<float>(v)) : v;
+    uint64_t bits = 0;
+    std::memcpy(&bits, &d, sizeof(bits));
+    std::ostringstream oss;
+    oss << "0x" << std::uppercase << std::hex << std::setw(16) << std::setfill('0')
+        << bits;
+    return oss.str();
+}
+
+
 std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
+    if (ty && ty->isFloat()) {
+        return formatLLVMFloat((double)v, ty->byteSize() == 4);
+    }
     if (!ty || !ty->isInteger()) return std::to_string(v);
     int bw = ty->bitWidth();
     if (bw > 0 && bw < 64) {
@@ -359,7 +374,12 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
     return std::visit([&](auto& x) -> ResolvedTyPtr {
         using T = std::decay_t<decltype(x)>;
         if constexpr (std::is_same_v<T, IntLitExpr>)    return Ty::I32();
-        if constexpr (std::is_same_v<T, FloatLitExpr>)  return Ty::F64();
+        if constexpr (std::is_same_v<T, FloatLitExpr>) {
+            auto ctxIt = currentSubst_.find("#ctx");
+            if (ctxIt != currentSubst_.end() && ctxIt->second && ctxIt->second->isFloat())
+                return ctxIt->second;
+            return Ty::F64();
+        }
         if constexpr (std::is_same_v<T, StringLitExpr>) return Ty::Str();
         if constexpr (std::is_same_v<T, CharLitExpr>)   return Ty::Char();
         if constexpr (std::is_same_v<T, BoolLitExpr>)   return Ty::Bool();
@@ -401,7 +421,16 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 x.op == "&&" || x.op == "||")
                 return Ty::Bool();
             auto lhsTy = exprType(*x.lhs);
-            auto rhsTy = exprType(*x.rhs);
+            ResolvedTyPtr rhsTy;
+            if (lhsTy && (lhsTy->isFloat() || lhsTy->isInteger())) {
+                auto& mutableSubst = const_cast<SubstMap&>(currentSubst_);
+                SubstMap saved = mutableSubst;
+                mutableSubst["#ctx"] = lhsTy;
+                rhsTy = exprType(*x.rhs);
+                mutableSubst = saved;
+            } else {
+                rhsTy = exprType(*x.rhs);
+            }
             if (lhsTy && rhsTy) {
                 if (lhsTy->isFloat() && rhsTy->isFloat() &&
                     lhsTy->byteSize() != rhsTy->byteSize())
@@ -409,6 +438,8 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 if (lhsTy->isInteger() && rhsTy->isInteger() &&
                     lhsTy->bitWidth() != rhsTy->bitWidth())
                     return (lhsTy->bitWidth() >= rhsTy->bitWidth()) ? lhsTy : rhsTy;
+                if (lhsTy->isFloat()   && rhsTy->isInteger()) return lhsTy;
+                if (lhsTy->isInteger() && rhsTy->isFloat())   return rhsTy;
             }
             return lhsTy ? lhsTy : Ty::I32();
         }
@@ -921,7 +952,17 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
         currentSubst_ = saved;
 
         auto initTy = exprType(*vd.init);
-        if (initTy && ty &&
+
+        bool initIsCtxFloat = ty && ty->isFloat() &&
+            initTy && initTy->isFloat() && !ty->equals(*initTy) &&
+            (vd.init->template is<FloatLitExpr>() ||
+             vd.init->template is<IntLitExpr>()   ||
+             vd.init->template is<UnaryOpExpr>()  ||
+             vd.init->template is<BinOpExpr>());
+
+        if (initIsCtxFloat) {
+            storeVar(effectiveName, val, ty);
+        } else if (initTy && ty &&
             initTy->isInteger() && ty->isInteger() &&
             ty->bitWidth() > initTy->bitWidth()) {
             storeVar(effectiveName, val, ty);
@@ -1091,14 +1132,18 @@ std::string CodeGen::emitExpr(const Expr& e) {
     return std::visit([&](auto& x) -> std::string {
         using T = std::decay_t<decltype(x)>;
 
-        if constexpr (std::is_same_v<T, IntLitExpr>)
+        if constexpr (std::is_same_v<T, IntLitExpr>) {
+            auto ctxIt = currentSubst_.find("#ctx");
+            if (ctxIt != currentSubst_.end() && ctxIt->second && ctxIt->second->isFloat())
+                return emitIntLit(x.val, ctxIt->second);
             return std::to_string(x.val);
+        }
 
         if constexpr (std::is_same_v<T, FloatLitExpr>) {
-            std::string s = std::format("{:.17g}", x.val);
-            if (s.find_first_of(".eE") == std::string::npos)
-                s += ".0";
-            return s;
+            auto ctxIt = currentSubst_.find("#ctx");
+            bool asFloat32 = (ctxIt != currentSubst_.end() && ctxIt->second &&
+                              ctxIt->second->isFloat() && ctxIt->second->byteSize() == 4);
+            return formatLLVMFloat((double)x.val, asFloat32);
         }
 
         if constexpr (std::is_same_v<T, StringLitExpr>) {
@@ -1191,7 +1236,15 @@ std::string CodeGen::emitExpr(const Expr& e) {
                 diag_.error(e.loc, "array literal cannot be empty", lineFor(e.loc));
                 return "undef";
             }
-            auto elemTy = exprType(*x.elems[0]);
+            ResolvedTyPtr elemTy;
+            {
+                auto ctxIt = currentSubst_.find("#ctx");
+                if (ctxIt != currentSubst_.end() && ctxIt->second &&
+                    ctxIt->second->isArray() && ctxIt->second->elemTy)
+                    elemTy = ctxIt->second->elemTy;
+                else
+                    elemTy = exprType(*x.elems[0]);
+            }
             int64_t N   = (int64_t)x.elems.size();
             auto arrTy  = Ty::Array(elemTy, N);
 
@@ -1200,6 +1253,10 @@ std::string CodeGen::emitExpr(const Expr& e) {
             line("  " + ptr + " = alloca " + llvmTy(arrTy) +
                  ", align " + std::to_string(align));
             line("  store " + llvmTy(arrTy) + " zeroinitializer, ptr " + ptr);
+
+            SubstMap savedSubst = currentSubst_;
+            if (elemTy && !elemTy->isGeneric())
+                currentSubst_["#ctx"] = elemTy;
 
             for (int64_t i = 0; i < N; ++i) {
                 std::string val = emitExpr(*x.elems[i]);
@@ -1215,6 +1272,8 @@ std::string CodeGen::emitExpr(const Expr& e) {
                          ", ptr " + ep + ", align " + std::to_string(align));
                 }
             }
+
+            currentSubst_ = savedSubst;
             return ptr;
         }
 
@@ -1259,8 +1318,15 @@ std::string CodeGen::emitExpr(const Expr& e) {
                 line("  " + fp + " = getelementptr inbounds %" + ty->name +
                     ", ptr " + ptr + ", i32 0, i32 " + std::to_string(idx));
 
+                SubstMap savedSubst = currentSubst_;
+                if (fty && !fty->isGeneric())
+                    currentSubst_["#ctx"] = fty;
+
                 std::string val = emitExpr(*f.value);
                 auto vty = exprType(*f.value);
+
+                currentSubst_ = savedSubst;
+
                 val = implicitCoerce(val, vty, fty, *fnOut_, tmpIdx_);
 
                 if (isAggTy(fty)) {
@@ -1686,6 +1752,17 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
         }
     }
 
+    auto rhsIsCtxSensitiveFloatExpr = [&]() {
+        return a.rhs->template is<FloatLitExpr>() ||
+               a.rhs->template is<IntLitExpr>()   ||
+               a.rhs->template is<UnaryOpExpr>()  ||
+               a.rhs->template is<BinOpExpr>();
+    };
+    if (lty && rvalTy && lty->isFloat() && rvalTy->isFloat() &&
+        !lty->equals(*rvalTy) && rhsIsCtxSensitiveFloatExpr()) {
+        rvalTy = lty;
+    }
+
     if (lty && rvalTy && !lty->equals(*rvalTy))
         rval = implicitCoerce(rval, rvalTy, lty, *fnOut_, tmpIdx_);
 
@@ -1748,6 +1825,13 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     std::string lv = emitExpr(*b.lhs);
     auto lty = exprType(*b.lhs);
     auto lty_emitted = lty;
+    if (b.lhs->template is<IntLitExpr>()) {
+        auto ctxIt2 = currentSubst_.find("#ctx");
+        if (ctxIt2 != currentSubst_.end() && ctxIt2->second && ctxIt2->second->isFloat()) {
+            lty         = ctxIt2->second;
+            lty_emitted = ctxIt2->second;
+        }
+    }
     if (b.lhs->template is<BinOpExpr>()) {
         if (ctxTyBin && lty_emitted && lty_emitted->isInteger() && ctxTyBin->isInteger() &&
             ctxTyBin->bitWidth() > lty_emitted->bitWidth()) {
@@ -1782,6 +1866,13 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
         if (lty && rty_emitted && rty_emitted->isFloat() && lty->isFloat() &&
             lty->byteSize() > rty_emitted->byteSize()) {
             rty_emitted = lty;
+        }
+    }
+    if (b.rhs->template is<IntLitExpr>()) {
+        auto ctxIt2 = currentSubst_.find("#ctx");
+        if (ctxIt2 != currentSubst_.end() && ctxIt2->second && ctxIt2->second->isFloat()) {
+            rty         = ctxIt2->second;
+            rty_emitted = ctxIt2->second;
         }
     }
     currentSubst_ = savedBin;
@@ -1889,6 +1980,8 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
         lty->byteSize() != rty->byteSize()) {
         ty = (lty->byteSize() >= rty->byteSize()) ? lty : rty;
     }
+    if (lty && rty && lty->isFloat()   && rty->isInteger()) ty = lty;
+    if (lty && rty && lty->isInteger() && rty->isFloat())   ty = rty;
     bool flt = ty && ty->isFloat();
     bool uns = ty && ty->isUnsigned();
     bool i1  = ty && ty->kind == TyKind::Bool;
@@ -2120,10 +2213,7 @@ std::string CodeGen::emitIndex(const IndexExpr& ix, const SourceLoc& loc) {
     auto arrTy  = exprType(*ix.arr);
     auto idxTy  = exprType(*ix.idx);
 
-    SubstMap savedIdx = currentSubst_;
-    currentSubst_["#ctx"] = Ty::I64();
-    std::string idxVal  = emitExpr(*ix.idx);
-    currentSubst_ = savedIdx;
+    std::string idxVal = emitExpr(*ix.idx);
 
     if (idxTy && idxTy->isInteger() && idxTy->bitWidth() != 64) {
         std::string coerced = newTmp();
@@ -2330,7 +2420,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             : nullptr;
 
         if (c.args[i]->template is<IntLitExpr>() &&
-            expectedTy && expectedTy->isInteger() && !expectedTy->isGeneric()) {
+            expectedTy && (expectedTy->isInteger() || expectedTy->isFloat()) && !expectedTy->isGeneric()) {
             ai.val = emitIntLit(c.args[i]->template as<IntLitExpr>().val, expectedTy);
             ai.ty  = expectedTy;
         } else {

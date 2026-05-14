@@ -90,6 +90,13 @@ static bool isPointerLike(const ResolvedTyPtr& ty) {
     return ty && (ty->isPtr() || ty->isStr());
 }
 
+static bool ptrTypesCompat(const ResolvedTyPtr& a, const ResolvedTyPtr& b) {
+    if (!a || !b) return false;
+    if (!isPointerLike(a) || !isPointerLike(b)) return false;
+    if (a->isStr() != b->isStr()) return false;
+    return true;
+}
+
 void SemaPass::collectOpaques() {
     for (auto& od : prog_.opaques) {
         if (opaques_.count(od->name) || structs_.count(od->name) || enums_.count(od->name)) {
@@ -393,6 +400,7 @@ void SemaPass::checkGlobals() {
             return c.operand && c.operand->is<IntLitExpr>() &&
                    c.operand->as<IntLitExpr>().val == 0;
         }
+        
         return false;
     };
 
@@ -420,8 +428,7 @@ void SemaPass::checkGlobals() {
         if (!initTy || initTy->isError() || initTy->isVoid()) continue;
         if (declTy->isGeneric() || initTy->isGeneric())       continue;
 
-        bool ptrCompat = (initTy->isStr() || initTy->isPtr()) &&
-                         (declTy->isStr() || declTy->isPtr());
+        bool ptrCompat = ptrTypesCompat(initTy, declTy);
         bool intCompat = initTy->isInteger() && declTy->isInteger();
         bool fltCompat = initTy->isFloat()   && declTy->isFloat();
 
@@ -626,8 +633,7 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
                     !declTy->isGeneric() && !isGenericTy(initTy) &&
                     !initTy->isVoid() && !initTy->isError() &&
                     !initTy->equals(*declTy)) {
-                    bool ptrCompat = (initTy->isStr() || initTy->isPtr()) &&
-                                     (declTy->isStr()  || declTy->isPtr());
+                    bool ptrCompat = ptrTypesCompat(initTy, declTy);
                     if (!ptrCompat)
                         diag_.error(s.loc,
                             std::format(
@@ -689,8 +695,7 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
                     retSubst["#ctx"] = retTy;
                 auto t = checkExpr(*x.value, scope, handles, retSubst);
                 if (retTy && !retTy->isVoid() && t && !isGenericTy(t) && !isGenericTy(retTy)) {
-                    bool ptrCompat = (t->isStr() || t->isPtr()) &&
-                                     (retTy->isStr() || retTy->isPtr());
+                    bool ptrCompat = ptrTypesCompat(t, retTy);
                     if (!t->isError() && !t->equals(*retTy) && !ptrCompat) {
                         diag_.error(s.loc,
                             std::format("return type mismatch: returning '{}' but function returns '{}'",
@@ -760,8 +765,12 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
 
         if constexpr (std::is_same_v<T, IntLitExpr>) {
             auto ctxIt = subst.find("#ctx");
-            if (ctxIt != subst.end() && ctxIt->second && ctxIt->second->isInteger())
-                return ctxIt->second;
+            if (ctxIt != subst.end() && ctxIt->second) {
+                if (ctxIt->second->isInteger())
+                    return ctxIt->second;
+                if (ctxIt->second->isFloat())
+                    return ctxIt->second;
+            }
             return Ty::I32();
         }
         if constexpr (std::is_same_v<T, FloatLitExpr>) {
@@ -861,8 +870,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
                 if (v && rTy && !isGenericTy(rTy) && !v->type->isGeneric() &&
                     !rTy->isVoid() && !rTy->isError() && !rTy->equals(*v->type)) {
-                    bool ptrCompat = (rTy->isStr() || rTy->isPtr()) &&
-                                     (v->type->isStr() || v->type->isPtr());
+                    bool ptrCompat = ptrTypesCompat(rTy, v->type);
                     if (!ptrCompat)
                         diag_.error(e.loc,
                             std::format("cannot assign value of type '{}' to variable '{}' of type '{}'",
@@ -884,6 +892,13 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             SubstMap binSubst = subst;
             if (lt && (lt->isInteger() || lt->isFloat()))
                 binSubst["#ctx"] = lt;
+            {
+                auto outerCtx = subst.find("#ctx");
+                if (outerCtx != subst.end() && outerCtx->second &&
+                    outerCtx->second->isFloat() && lt && !lt->isFloat()) {
+                    binSubst["#ctx"] = outerCtx->second;
+                }
+            }
             auto rt = checkExpr(*x.rhs, scope, handles, binSubst);
             if (x.op == "+" && lt && lt->isStr() && rt && rt->isStr()) return Ty::Str();
             if (x.op == "&&" || x.op == "||") return Ty::Bool();
@@ -916,6 +931,10 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
                 return Ty::Bool();
             }
+            if (rt && rt->isFloat() && lt && !lt->isFloat())
+                return rt;
+            if (lt && lt->isFloat() && rt && !rt->isFloat())
+                return lt;
             return lt ? lt : Ty::I32();
         }
 
@@ -1058,8 +1077,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     !expectedTy->isGeneric() && !argTy->isGeneric() &&
                     !expectedTy->isError()   && !argTy->isError()   &&
                     !argTy->equals(*expectedTy)) {
-                    bool ptrCompat = (argTy->isStr() || argTy->isPtr()) &&
-                                     (expectedTy->isStr() || expectedTy->isPtr());
+                    bool ptrCompat = ptrTypesCompat(argTy, expectedTy);
                     if (!ptrCompat)
                         diag_.error(x.args[i]->loc,
                             std::format(
@@ -1183,9 +1201,16 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 diag_.error(e.loc, "array literal cannot be empty", lineFor(e.loc));
                 return Ty::Array(Ty::I32(), 0);
             }
-            auto elemTy = checkExpr(*x.elems[0], scope, handles, subst);
+            SubstMap elemSubst = subst;
+            {
+                auto ctxIt = subst.find("#ctx");
+                if (ctxIt != subst.end() && ctxIt->second &&
+                    ctxIt->second->isArray() && ctxIt->second->elemTy)
+                    elemSubst["#ctx"] = ctxIt->second->elemTy;
+            }
+            auto elemTy = checkExpr(*x.elems[0], scope, handles, elemSubst);
             for (size_t i = 1; i < x.elems.size(); ++i) {
-                auto t = checkExpr(*x.elems[i], scope, handles, subst);
+                auto t = checkExpr(*x.elems[i], scope, handles, elemSubst);
                 if (elemTy && t && !elemTy->equals(*t) &&
                     !(elemTy->isInteger() && t->isInteger()) &&
                     !(elemTy->isFloat() && t->isFloat())) {
@@ -1457,8 +1482,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 if (fTy && expectedFTy &&
                     !fTy->isGeneric() && !expectedFTy->isGeneric() &&
                     !fTy->equals(*expectedFTy)) {
-                    bool ptrCompat = (fTy->isStr() || fTy->isPtr()) &&
-                                    (expectedFTy->isStr() || expectedFTy->isPtr());
+                    bool ptrCompat = ptrTypesCompat(fTy, expectedFTy);
                     if (!ptrCompat) {
                         diag_.error(f.value->loc,
                             std::format(
