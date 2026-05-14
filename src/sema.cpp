@@ -760,8 +760,12 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
 
         if constexpr (std::is_same_v<T, IntLitExpr>) {
             auto ctxIt = subst.find("#ctx");
-            if (ctxIt != subst.end() && ctxIt->second && ctxIt->second->isInteger())
-                return ctxIt->second;
+            if (ctxIt != subst.end() && ctxIt->second) {
+                if (ctxIt->second->isInteger())
+                    return ctxIt->second;
+                if (ctxIt->second->isFloat())
+                    return ctxIt->second;
+            }
             return Ty::I32();
         }
         if constexpr (std::is_same_v<T, FloatLitExpr>) {

@@ -77,6 +77,12 @@ static int validAlign(int byteSize, bool packed = false) {
 }
 
 std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
+    if (ty && ty->isFloat()) {
+        std::string s = std::format("{:.17g}", (double)v);
+        if (s.find_first_of(".eE") == std::string::npos)
+            s += ".0";
+        return s;
+    }
     if (!ty || !ty->isInteger()) return std::to_string(v);
     int bw = ty->bitWidth();
     if (bw > 0 && bw < 64) {
@@ -1091,8 +1097,12 @@ std::string CodeGen::emitExpr(const Expr& e) {
     return std::visit([&](auto& x) -> std::string {
         using T = std::decay_t<decltype(x)>;
 
-        if constexpr (std::is_same_v<T, IntLitExpr>)
+        if constexpr (std::is_same_v<T, IntLitExpr>) {
+            auto ctxIt = currentSubst_.find("#ctx");
+            if (ctxIt != currentSubst_.end() && ctxIt->second && ctxIt->second->isFloat())
+                return emitIntLit(x.val, ctxIt->second);
             return std::to_string(x.val);
+        }
 
         if constexpr (std::is_same_v<T, FloatLitExpr>) {
             std::string s = std::format("{:.17g}", x.val);
@@ -2330,7 +2340,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             : nullptr;
 
         if (c.args[i]->template is<IntLitExpr>() &&
-            expectedTy && expectedTy->isInteger() && !expectedTy->isGeneric()) {
+            expectedTy && (expectedTy->isInteger() || expectedTy->isFloat()) && !expectedTy->isGeneric()) {
             ai.val = emitIntLit(c.args[i]->template as<IntLitExpr>().val, expectedTy);
             ai.ty  = expectedTy;
         } else {
