@@ -415,6 +415,8 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 if (lhsTy->isInteger() && rhsTy->isInteger() &&
                     lhsTy->bitWidth() != rhsTy->bitWidth())
                     return (lhsTy->bitWidth() >= rhsTy->bitWidth()) ? lhsTy : rhsTy;
+                if (lhsTy->isFloat()   && rhsTy->isInteger()) return lhsTy;
+                if (lhsTy->isInteger() && rhsTy->isFloat())   return rhsTy;
             }
             return lhsTy ? lhsTy : Ty::I32();
         }
@@ -1758,6 +1760,13 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     std::string lv = emitExpr(*b.lhs);
     auto lty = exprType(*b.lhs);
     auto lty_emitted = lty;
+    if (b.lhs->template is<IntLitExpr>()) {
+        auto ctxIt2 = currentSubst_.find("#ctx");
+        if (ctxIt2 != currentSubst_.end() && ctxIt2->second && ctxIt2->second->isFloat()) {
+            lty         = ctxIt2->second;
+            lty_emitted = ctxIt2->second;
+        }
+    }
     if (b.lhs->template is<BinOpExpr>()) {
         if (ctxTyBin && lty_emitted && lty_emitted->isInteger() && ctxTyBin->isInteger() &&
             ctxTyBin->bitWidth() > lty_emitted->bitWidth()) {
@@ -1792,6 +1801,13 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
         if (lty && rty_emitted && rty_emitted->isFloat() && lty->isFloat() &&
             lty->byteSize() > rty_emitted->byteSize()) {
             rty_emitted = lty;
+        }
+    }
+    if (b.rhs->template is<IntLitExpr>()) {
+        auto ctxIt2 = currentSubst_.find("#ctx");
+        if (ctxIt2 != currentSubst_.end() && ctxIt2->second && ctxIt2->second->isFloat()) {
+            rty         = ctxIt2->second;
+            rty_emitted = ctxIt2->second;
         }
     }
     currentSubst_ = savedBin;
@@ -1899,6 +1915,8 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
         lty->byteSize() != rty->byteSize()) {
         ty = (lty->byteSize() >= rty->byteSize()) ? lty : rty;
     }
+    if (lty && rty && lty->isFloat()   && rty->isInteger()) ty = lty;
+    if (lty && rty && lty->isInteger() && rty->isFloat())   ty = rty;
     bool flt = ty && ty->isFloat();
     bool uns = ty && ty->isUnsigned();
     bool i1  = ty && ty->kind == TyKind::Bool;

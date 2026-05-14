@@ -393,6 +393,7 @@ void SemaPass::checkGlobals() {
             return c.operand && c.operand->is<IntLitExpr>() &&
                    c.operand->as<IntLitExpr>().val == 0;
         }
+        
         return false;
     };
 
@@ -888,6 +889,13 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             SubstMap binSubst = subst;
             if (lt && (lt->isInteger() || lt->isFloat()))
                 binSubst["#ctx"] = lt;
+            {
+                auto outerCtx = subst.find("#ctx");
+                if (outerCtx != subst.end() && outerCtx->second &&
+                    outerCtx->second->isFloat() && lt && !lt->isFloat()) {
+                    binSubst["#ctx"] = outerCtx->second;
+                }
+            }
             auto rt = checkExpr(*x.rhs, scope, handles, binSubst);
             if (x.op == "+" && lt && lt->isStr() && rt && rt->isStr()) return Ty::Str();
             if (x.op == "&&" || x.op == "||") return Ty::Bool();
@@ -920,6 +928,10 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
                 return Ty::Bool();
             }
+            if (rt && rt->isFloat() && lt && !lt->isFloat())
+                return rt;
+            if (lt && lt->isFloat() && rt && !rt->isFloat())
+                return lt;
             return lt ? lt : Ty::I32();
         }
 
