@@ -373,6 +373,10 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
     for (auto* g : runtimeInits) {
         auto ty  = sema_.resolveType(*g->type);
 
+        SubstMap savedSubst = currentSubst_;
+        if (ty && (ty->isFloat() || ty->isInteger()))
+            currentSubst_["#ctx"] = ty;
+
         if (ty && ty->isStr()) {
             std::string rawVal;
             if (g->init->is<StringLitExpr>()) {
@@ -389,8 +393,46 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
                  ", i64 " + std::to_string(llvmByteSize(ty)) + ")");
         } else {
             std::string val = emitExpr(*g->init);
+            auto initTy = exprType(*g->init);
+            if (ty && initTy && !initTy->equals(*ty) &&
+                !ty->isVoid() && !initTy->isVoid()) {
+                std::string tmp = "%t" + std::to_string(tmpIdx_++);
+                std::string fs  = initTy->llvmType();
+                std::string ft  = ty->llvmType();
+
+                if (initTy->isInteger() && ty->isInteger()) {
+                    int sw = initTy->bitWidth();
+                    int dw = ty->bitWidth();
+                    if (dw > sw) {
+                        line("  " + tmp + " = " + (initTy->isSigned() ? "sext" : "zext") +
+                             " " + fs + " " + val + " to " + ft);
+                        val = tmp;
+                    } else if (dw < sw) {
+                        line("  " + tmp + " = trunc " + fs + " " + val + " to " + ft);
+                        val = tmp;
+                    }
+                } else if (initTy->isFloat() && ty->isFloat()) {
+                    int sw = initTy->byteSize();
+                    int dw = ty->byteSize();
+                    if (dw > sw)
+                        line("  " + tmp + " = fpext " + fs + " " + val + " to " + ft);
+                    else
+                        line("  " + tmp + " = fptrunc " + fs + " " + val + " to " + ft);
+                    val = tmp;
+                } else if (initTy->isInteger() && ty->isFloat()) {
+                    line("  " + tmp + " = " + (initTy->isSigned() ? "sitofp" : "uitofp") +
+                         " " + fs + " " + val + " to " + ft);
+                    val = tmp;
+                } else if (initTy->isFloat() && ty->isInteger()) {
+                    line("  " + tmp + " = " + (ty->isSigned() ? "fptosi" : "fptoui") +
+                         " " + fs + " " + val + " to " + ft);
+                    val = tmp;
+                }
+            }
             line("  store " + llvmTy(ty) + " " + val + ", ptr @" + g->name);
         }
+
+        currentSubst_ = savedSubst;
     }
 
     line("  ret void");
