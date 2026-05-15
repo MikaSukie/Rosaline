@@ -431,17 +431,32 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             } else {
                 rhsTy = exprType(*x.rhs);
             }
+            ResolvedTyPtr result = lhsTy ? lhsTy : Ty::I32();
             if (lhsTy && rhsTy) {
                 if (lhsTy->isFloat() && rhsTy->isFloat() &&
                     lhsTy->byteSize() != rhsTy->byteSize())
-                    return (lhsTy->byteSize() >= rhsTy->byteSize()) ? lhsTy : rhsTy;
-                if (lhsTy->isInteger() && rhsTy->isInteger() &&
-                    lhsTy->bitWidth() != rhsTy->bitWidth())
-                    return (lhsTy->bitWidth() >= rhsTy->bitWidth()) ? lhsTy : rhsTy;
-                if (lhsTy->isFloat()   && rhsTy->isInteger()) return lhsTy;
-                if (lhsTy->isInteger() && rhsTy->isFloat())   return rhsTy;
+                    result = (lhsTy->byteSize() >= rhsTy->byteSize()) ? lhsTy : rhsTy;
+                else if (lhsTy->isInteger() && rhsTy->isInteger() &&
+                         lhsTy->bitWidth() != rhsTy->bitWidth())
+                    result = (lhsTy->bitWidth() >= rhsTy->bitWidth()) ? lhsTy : rhsTy;
+                else if (lhsTy->isFloat()   && rhsTy->isInteger())
+                    result = lhsTy;
+                else if (lhsTy->isInteger() && rhsTy->isFloat())
+                    result = rhsTy;
             }
-            return lhsTy ? lhsTy : Ty::I32();
+            auto ctxIt = currentSubst_.find("#ctx");
+            if (ctxIt != currentSubst_.end() && ctxIt->second && result &&
+                !result->equals(*ctxIt->second)) {
+                auto ctxTy = ctxIt->second;
+                if (result->isInteger() && ctxTy->isInteger() &&
+                    ctxTy->bitWidth() > result->bitWidth()) {
+                    result = ctxTy;
+                } else if (result->isFloat() && ctxTy->isFloat() &&
+                           ctxTy->byteSize() > result->byteSize()) {
+                    result = ctxTy;
+                }
+            }
+            return result;
         }
         if constexpr (std::is_same_v<T, CastExpr>) {
             return sema_.resolveType(*x.type, currentSubst_);
