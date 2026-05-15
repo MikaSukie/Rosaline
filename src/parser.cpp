@@ -594,15 +594,12 @@ StmtPtr Parser::parseIf() {
     consume();
 
     IfStmt ifs;
-    bool hasParen = check(TK::Lparen) && !(isTypeStart(1) && check(TK::Rparen, 2))
-                    && match(TK::Lparen);
     {
         bool savedNSI = noStructInit_;
-        noStructInit_ = !hasParen;
+        noStructInit_ = true;
         ifs.cond = parseExpr();
         noStructInit_ = savedNSI;
     }
-    if (hasParen) expect(TK::Rparen, "expected ')' after if condition");
 
     expect(TK::Lbrace, "expected '{' after if condition");
     ifs.thenBody = parseBlock();
@@ -628,15 +625,12 @@ StmtPtr Parser::parseWhile() {
     consume();
 
     WhileStmt ws;
-    bool hasParen = check(TK::Lparen) && !(isTypeStart(1) && check(TK::Rparen, 2))
-                    && match(TK::Lparen);
     {
         bool savedNSI = noStructInit_;
-        noStructInit_ = !hasParen;
+        noStructInit_ = true;
         ws.cond = parseExpr();
         noStructInit_ = savedNSI;
     }
-    if (hasParen) expect(TK::Rparen, "expected ')' after while condition");
 
     expect(TK::Lbrace, "expected '{' after while condition");
     ws.body = parseBlock();
