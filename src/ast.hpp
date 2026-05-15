@@ -13,6 +13,7 @@ using ExprPtr     = std::unique_ptr<Expr>;
 enum class PrimKind {
     I8, I16, I32, I64,
     U8, U16, U32, U64,
+    IPtr, UPtr, ISize, USize,
     Bool, Char, Str,
     F32, F64,
     Void,
@@ -336,6 +337,10 @@ inline std::string TypeNode::str() const {
             case PrimKind::U16:  return "u16";
             case PrimKind::U32:  return "u32";
             case PrimKind::U64:  return "u64";
+            case PrimKind::IPtr: return "iptr";
+            case PrimKind::UPtr: return "uptr";
+            case PrimKind::ISize:return "isize";
+            case PrimKind::USize:return "usize";
             case PrimKind::Bool: return "bool";
             case PrimKind::Char: return "char";
             case PrimKind::Str:  return "str";

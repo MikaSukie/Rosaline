@@ -8,6 +8,7 @@ enum class TyKind {
     Void, Bool,
     I8, I16, I32, I64,
     U8, U16, U32, U64,
+    IPtr, UPtr, ISize, USize,
     F32, F64,
     Char, Str,
     Ptr,
@@ -32,19 +33,23 @@ struct ResolvedTy {
     std::string   genericName;
 
     bool isInteger() const {
-        return kind == TyKind::I8  || kind == TyKind::I16 ||
-               kind == TyKind::I32 || kind == TyKind::I64 ||
-               kind == TyKind::U8  || kind == TyKind::U16 ||
-               kind == TyKind::U32 || kind == TyKind::U64 ||
+        return kind == TyKind::I8   || kind == TyKind::I16  ||
+               kind == TyKind::I32  || kind == TyKind::I64  ||
+               kind == TyKind::U8   || kind == TyKind::U16  ||
+               kind == TyKind::U32  || kind == TyKind::U64  ||
+               kind == TyKind::IPtr || kind == TyKind::UPtr ||
+               kind == TyKind::ISize|| kind == TyKind::USize||
                kind == TyKind::Char || kind == TyKind::Bool;
     }
     bool isSigned() const {
-        return kind == TyKind::I8  || kind == TyKind::I16 ||
-               kind == TyKind::I32 || kind == TyKind::I64;
+        return kind == TyKind::I8   || kind == TyKind::I16  ||
+               kind == TyKind::I32  || kind == TyKind::I64  ||
+               kind == TyKind::IPtr || kind == TyKind::ISize;
     }
     bool isUnsigned() const {
-        return kind == TyKind::U8  || kind == TyKind::U16 ||
-               kind == TyKind::U32 || kind == TyKind::U64;
+        return kind == TyKind::U8   || kind == TyKind::U16  ||
+               kind == TyKind::U32  || kind == TyKind::U64  ||
+               kind == TyKind::UPtr || kind == TyKind::USize;
     }
     bool isFloat()  const { return kind == TyKind::F32 || kind == TyKind::F64; }
     bool isVoid()   const { return kind == TyKind::Void;    }
@@ -65,6 +70,8 @@ struct ResolvedTy {
         case TyKind::Bool:                                     return 1;
         case TyKind::I32: case TyKind::U32:                    return 32;
         case TyKind::I64: case TyKind::U64:                    return 64;
+        case TyKind::IPtr: case TyKind::UPtr:
+        case TyKind::ISize: case TyKind::USize:                return 64;
         default: return 0;
         }
     }
@@ -75,6 +82,8 @@ struct ResolvedTy {
         case TyKind::I16: case TyKind::U16: return 2;
         case TyKind::I32: case TyKind::U32: case TyKind::F32: return 4;
         case TyKind::I64: case TyKind::U64: case TyKind::F64: return 8;
+        case TyKind::IPtr: case TyKind::UPtr:
+        case TyKind::ISize: case TyKind::USize:               return 8;
         case TyKind::Ptr: case TyKind::Str: return 8;
         case TyKind::Void: return 0;
         case TyKind::Array: return (int)(arraySize * (elemTy ? elemTy->byteSize() : 0));
@@ -107,6 +116,10 @@ namespace Ty {
     inline ResolvedTyPtr U16()   { return make(TyKind::U16);   }
     inline ResolvedTyPtr U32()   { return make(TyKind::U32);   }
     inline ResolvedTyPtr U64()   { return make(TyKind::U64);   }
+    inline ResolvedTyPtr IPtr()  { return make(TyKind::IPtr);  }
+    inline ResolvedTyPtr UPtr()  { return make(TyKind::UPtr);  }
+    inline ResolvedTyPtr ISize() { return make(TyKind::ISize); }
+    inline ResolvedTyPtr USize() { return make(TyKind::USize); }
     inline ResolvedTyPtr F32()   { return make(TyKind::F32);   }
     inline ResolvedTyPtr F64()   { return make(TyKind::F64);   }
     inline ResolvedTyPtr Char()  { return make(TyKind::Char);  }

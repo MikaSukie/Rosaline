@@ -6,6 +6,7 @@ enum class TK {
 
     I8, I16, I32, I64,
     U8, U16, U32, U64,
+    IPtr, UPtr, ISize, USize,
     Bool, Char, Str, F32, F64,
     Void,
 
@@ -64,6 +65,10 @@ inline std::string tkName(TK k) {
     case TK::U16:          return "u16";
     case TK::U32:          return "u32";
     case TK::U64:          return "u64";
+    case TK::IPtr:         return "iptr";
+    case TK::UPtr:         return "uptr";
+    case TK::ISize:        return "isize";
+    case TK::USize:        return "usize";
     case TK::Bool:         return "bool";
     case TK::Char:         return "char";
     case TK::Str:          return "str";

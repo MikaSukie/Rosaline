@@ -387,6 +387,7 @@ bool Parser::isTypeStart(int offset) const {
     TK k = peek(offset).kind;
     return k == TK::I8 || k == TK::I16 || k == TK::I32 || k == TK::I64
     || k == TK::U8 || k == TK::U16 || k == TK::U32 || k == TK::U64
+    || k == TK::IPtr || k == TK::UPtr || k == TK::ISize || k == TK::USize
     || k == TK::Bool || k == TK::Char || k == TK::Str
     || k == TK::F32 || k == TK::F64
     || k == TK::Void
@@ -435,6 +436,10 @@ TypeNodePtr Parser::parseBaseType() {
         case TK::U16:  makePrim(PrimKind::U16);      break;
         case TK::U32:  makePrim(PrimKind::U32);      break;
         case TK::U64:  makePrim(PrimKind::U64);      break;
+        case TK::IPtr: makePrim(PrimKind::IPtr);     break;
+        case TK::UPtr: makePrim(PrimKind::UPtr);     break;
+        case TK::ISize:makePrim(PrimKind::ISize);    break;
+        case TK::USize:makePrim(PrimKind::USize);    break;
         case TK::Bool: makePrim(PrimKind::Bool);     break;
         case TK::Char: makePrim(PrimKind::Char);     break;
         case TK::Str:  makePrim(PrimKind::Str);      break;

@@ -56,6 +56,10 @@ std::string ResolvedTy::str() const {
         case TyKind::U16:     return "u16";
         case TyKind::U32:     return "u32";
         case TyKind::U64:     return "u64";
+        case TyKind::IPtr:    return "iptr";
+        case TyKind::UPtr:    return "uptr";
+        case TyKind::ISize:   return "isize";
+        case TyKind::USize:   return "usize";
         case TyKind::F32:     return "f32";
         case TyKind::F64:     return "f64";
         case TyKind::Char:    return "char";
@@ -83,6 +87,10 @@ std::string ResolvedTy::mangle() const {
         case TyKind::U16:     return "u16";
         case TyKind::U32:     return "u32";
         case TyKind::U64:     return "u64";
+        case TyKind::IPtr:    return "iptr";
+        case TyKind::UPtr:    return "uptr";
+        case TyKind::ISize:   return "isize";
+        case TyKind::USize:   return "usize";
         case TyKind::F32:     return "f32";
         case TyKind::F64:     return "f64";
         case TyKind::Char:    return "char";
@@ -118,6 +126,10 @@ std::string ResolvedTy::llvmType() const {
         case TyKind::U32:     return "i32";
         case TyKind::I64:
         case TyKind::U64:     return "i64";
+        case TyKind::IPtr:
+        case TyKind::UPtr:
+        case TyKind::ISize:
+        case TyKind::USize:   return "i64";
         case TyKind::F32:     return "float";
         case TyKind::F64:     return "double";
         case TyKind::Str:     return "ptr";
@@ -211,6 +223,10 @@ ResolvedTyPtr TypeResolver::resolve(const TypeNode& tn, const SubstMap& subst) c
                 case PrimKind::U16:  return Ty::U16();
                 case PrimKind::U32:  return Ty::U32();
                 case PrimKind::U64:  return Ty::U64();
+                case PrimKind::IPtr: return Ty::IPtr();
+                case PrimKind::UPtr: return Ty::UPtr();
+                case PrimKind::ISize:return Ty::ISize();
+                case PrimKind::USize:return Ty::USize();
                 case PrimKind::Bool: return Ty::Bool();
                 case PrimKind::Char: return Ty::Char();
                 case PrimKind::Str:  return Ty::Str();
