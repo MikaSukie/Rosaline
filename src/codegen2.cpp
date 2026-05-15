@@ -134,7 +134,7 @@ std::string CodeGen::zeroVal(const ResolvedTyPtr& ty) const {
 
 void CodeGen::emitAggrCopy(const std::string& dst, const std::string& src,
                            const ResolvedTyPtr& ty) {
-    line("  call ptr @memcpy(ptr " + dst + ", ptr " + src +
+    line("  call void @memcpy(ptr " + dst + ", ptr " + src +
          ", i64 " + std::to_string(llvmByteSize(ty)) + ")");
 }
 
@@ -729,7 +729,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
             std::string localPtr = "%" + p.name + ".local";
             line("  " + localPtr + " = alloca " + llvmTy(pty) +
                  ", align " + std::to_string(align));
-            line("  call ptr @memcpy(ptr " + localPtr + ", ptr %" + p.name +
+            line("  call void @memcpy(ptr " + localPtr + ", ptr %" + p.name +
                  ", i64 " + std::to_string(sz) + ")");
             varAlloca_[p.name] = localPtr;
             varTypes_[p.name]  = pty;
@@ -1117,27 +1117,37 @@ void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
         line("  ret " + llvmTy(retTy) + " " + loaded);
     } else {
         auto valTy = exprType(*s.value);
-        if (valTy && !valTy->equals(*retTy) &&
-            retTy->isInteger() && valTy->isInteger()) {
+        if (valTy && !valTy->equals(*retTy)) {
             std::string coerced = newTmp();
-            if (retTy->bitWidth() > valTy->bitWidth())
+            if (retTy->isInteger() && valTy->isInteger()) {
+                if (retTy->bitWidth() > valTy->bitWidth())
+                    line("  " + coerced + " = " +
+                         (valTy->isSigned() ? "sext" : "zext") + " " +
+                         llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
+                else if (retTy->bitWidth() < valTy->bitWidth())
+                    line("  " + coerced + " = trunc " +
+                         llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
+                else coerced = val;
+                val = coerced;
+            } else if (retTy->isFloat() && valTy->isFloat()) {
+                if (retTy->byteSize() > valTy->byteSize())
+                    line("  " + coerced + " = fpext " +
+                         llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
+                else
+                    line("  " + coerced + " = fptrunc " +
+                         llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
+                val = coerced;
+            } else if (valTy->isInteger() && retTy->isFloat()) {
                 line("  " + coerced + " = " +
-                     (valTy->isSigned() ? "sext" : "zext") + " " +
+                     (valTy->isSigned() ? "sitofp" : "uitofp") + " " +
                      llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
-            else
-                line("  " + coerced + " = trunc " +
+                val = coerced;
+            } else if (valTy->isFloat() && retTy->isInteger()) {
+                line("  " + coerced + " = " +
+                     (retTy->isSigned() ? "fptosi" : "fptoui") + " " +
                      llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
-            val = coerced;
-        } else if (valTy && !valTy->equals(*retTy) &&
-                   retTy->isFloat() && valTy->isFloat()) {
-            std::string coerced = newTmp();
-            if (retTy->byteSize() > valTy->byteSize())
-                line("  " + coerced + " = fpext " +
-                     llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
-            else
-                line("  " + coerced + " = fptrunc " +
-                     llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
-            val = coerced;
+                val = coerced;
+            }
         }
         line("  ret " + llvmTy(retTy) + " " + val);
     }
@@ -1796,7 +1806,6 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
 std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     if (b.op == "&&" || b.op == "||") {
         std::string lv    = emitExpr(*b.lhs);
-        std::string lLbl  = "%" + newLabel() + "_sc_l";
         std::string rhsLbl = newLabel();
         std::string endLbl = newLabel();
         std::string resPtr = newTmp() + ".sc";
@@ -2089,8 +2098,8 @@ std::string CodeGen::emitStringConcat(const std::string& lv, const std::string& 
     line("  " + tot1 + " = add i64 " + tot + ", 1");
     std::string buf = newTmp();
     line("  " + buf + " = call ptr @malloc(i64 " + tot1 + ")");
-    line("  call ptr @strcpy(ptr " + buf + ", ptr " + lv + ")");
-    line("  call ptr @strcat(ptr " + buf + ", ptr " + rv + ")");
+    line("  call void @strcpy(ptr " + buf + ", ptr " + lv + ")");
+    line("  call void @strcat(ptr " + buf + ", ptr " + rv + ")");
     return buf;
 }
 
@@ -2373,7 +2382,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
         }
 
         diag_.error(loc,
-            std::format("cannot infer generic type '{}'' in call to '{}'", gp, fname),
+            std::format("cannot infer generic type '{}' in call to '{}'", gp, fname),
             lineFor(loc));
         return "undef";
     }
@@ -2459,7 +2468,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
                 line("  " + len  + " = call i64 @strlen(ptr " + ai.val + ")");
                 line("  " + len1 + " = add i64 " + len + ", 1");
                 line("  " + buf  + " = call ptr @malloc(i64 " + len1 + ")");
-                line("  call ptr @strcpy(ptr " + buf + ", ptr " + ai.val + ")");
+                line("  call void @strcpy(ptr " + buf + ", ptr " + ai.val + ")");
                 ai.val = buf;
             }
         }

@@ -303,20 +303,14 @@ void CodeGen::emitGlobals(std::vector<GlobalDecl*>& runtimeInits) {
                 init = std::to_string(g->init->as<IntLitExpr>().val);
             } else if (g->init->is<FloatLitExpr>()) {
                 double d = g->init->as<FloatLitExpr>().val;
-                if (ty && ty->kind == TyKind::F32) {
-                    float f = static_cast<float>(d);
-                    double asDouble = static_cast<double>(f);
-                    uint64_t bits64;
-                    __builtin_memcpy(&bits64, &asDouble, sizeof(bits64));
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "0x%016llX",
-                                  static_cast<unsigned long long>(bits64));
-                    init = buf;
-                } else {
-                    init = std::format("{:.17g}", d);
-                    if (init.find_first_of(".eE") == std::string::npos)
-                        init += ".0";
-                }
+                bool isF32 = ty && ty->kind == TyKind::F32;
+                double emitD = isF32 ? static_cast<double>(static_cast<float>(d)) : d;
+                uint64_t bits64;
+                __builtin_memcpy(&bits64, &emitD, sizeof(bits64));
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "0x%016llX",
+                              static_cast<unsigned long long>(bits64));
+                init = buf;
             } else if (g->init->is<BoolLitExpr>()) {
                 init = g->init->as<BoolLitExpr>().val ? "1" : "0";
             } else if (g->init->is<StringLitExpr>()) {
@@ -389,7 +383,7 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
             line("  store ptr " + owned + ", ptr @" + g->name + ", align 8");
         } else if (isAggTy(ty)) {
             std::string val = emitExpr(*g->init);
-            line("  call ptr @memcpy(ptr @" + g->name + ", ptr " + val +
+            line("  call void @memcpy(ptr @" + g->name + ", ptr " + val +
                  ", i64 " + std::to_string(llvmByteSize(ty)) + ")");
         } else {
             std::string val = emitExpr(*g->init);
@@ -429,7 +423,12 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
                     val = tmp;
                 }
             }
-            line("  store " + llvmTy(ty) + " " + val + ", ptr @" + g->name);
+            int gAlign = llvmByteSize(ty);
+            if (gAlign <= 0) gAlign = 1;
+            if (gAlign > 8) gAlign = 8;
+            { int a = 1; while (a < gAlign) a <<= 1; gAlign = a; }
+        line("  store " + llvmTy(ty) + " " + val + ", ptr @" + g->name +
+             ", align " + std::to_string(gAlign));
         }
 
         currentSubst_ = savedSubst;
@@ -494,9 +493,9 @@ void CodeGen::emitBuiltins() {
     out_ << "declare i64  @strlen(ptr)\n";
     out_ << "declare ptr  @malloc(i64)\n";
     out_ << "declare void @free(ptr)\n";
-    out_ << "declare ptr  @strcat(ptr, ptr)\n";
-    out_ << "declare ptr  @strcpy(ptr, ptr)\n";
-    out_ << "declare ptr  @memcpy(ptr, ptr, i64)\n";
+    out_ << "declare void @strcat(ptr, ptr)\n";
+    out_ << "declare void @strcpy(ptr, ptr)\n";
+    out_ << "declare void @memcpy(ptr, ptr, i64)\n";
     out_ << "declare i32  @atexit(ptr)\n";
     out_ << "; ==== End of Rosaline Builtins ==== \n";
     out_ << "\n";
@@ -646,7 +645,7 @@ std::string CodeGen::emitOwnedStrCopy(const std::string& src) {
     line("  " + len + " = call i64 @strlen(ptr " + src + ")");
     line("  " + len1 + " = add i64 " + len + ", 1");
     line("  " + buf + " = call ptr @malloc(i64 " + len1 + ")");
-    line("  call ptr @memcpy(ptr " + buf + ", ptr " + src + ", i64 " + len1 + ")");
+    line("  call void @memcpy(ptr " + buf + ", ptr " + src + ", i64 " + len1 + ")");
     line("  br label %" + endLbl);
 
     line(endLbl + ":");

@@ -1225,6 +1225,9 @@ ExprPtr Parser::parseMatchExpr() {
         MatchArm arm;
         arm.loc = cur().loc;
         arm.variantName = expect(TK::Ident, "expected variant name").text;
+        if (arm.variantName == "_") {
+            arm.isWildcard = true;
+        }
 
         if (check(TK::Lparen)) {
             consume();
