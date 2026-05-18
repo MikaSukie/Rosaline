@@ -71,6 +71,16 @@ std::string ResolvedTy::str() const {
         case TyKind::Opaque:  return name;
         case TyKind::Generic: return genericName;
         case TyKind::Error:   return "<error>";
+        case TyKind::FuncPtr: {
+            std::string s = "fn(";
+            for (size_t i = 0; i < funcParamTypes.size(); ++i) {
+                if (i) s += ",";
+                s += funcParamTypes[i] ? funcParamTypes[i]->str() : "?";
+            }
+            s += ")->";
+            s += funcRetType ? funcRetType->str() : "void";
+            return s;
+        }
     }
     return "?";
 }
@@ -109,6 +119,12 @@ std::string ResolvedTy::mangle() const {
         }
         case TyKind::Generic: return genericName;
         case TyKind::Error:   return "err";
+        case TyKind::FuncPtr: {
+            std::string s = "fn";
+            for (auto& pt : funcParamTypes) s += "_" + (pt ? pt->mangle() : "void");
+            s += "_r" + (funcRetType ? funcRetType->mangle() : "void");
+            return s;
+        }
     }
     return "unknown";
 }
@@ -152,6 +168,8 @@ std::string ResolvedTy::llvmType() const {
             return "ptr";
         case TyKind::Error:
             return "i32";
+        case TyKind::FuncPtr:
+            return "ptr";
     }
     return "i32";
 }
@@ -170,6 +188,15 @@ bool ResolvedTy::equals(const ResolvedTy& o) const {
             return name == o.name;
         case TyKind::Generic:
             return genericName == o.genericName;
+        case TyKind::FuncPtr: {
+            if (funcParamTypes.size() != o.funcParamTypes.size()) return false;
+            for (size_t i = 0; i < funcParamTypes.size(); ++i) {
+                if (!funcParamTypes[i] || !o.funcParamTypes[i]) return false;
+                if (!funcParamTypes[i]->equals(*o.funcParamTypes[i])) return false;
+            }
+            if (!funcRetType || !o.funcRetType) return funcRetType == o.funcRetType;
+            return funcRetType->equals(*o.funcRetType);
+        }
         default:
             return true;
     }
@@ -205,6 +232,19 @@ ResolvedTyPtr applySubst(const ResolvedTyPtr& ty, const SubstMap& subst) {
         nt->typeArgs = std::move(newArgs);
         return nt;
     }
+    if (ty->isFuncPtr()) {
+        bool changed = false;
+        std::vector<ResolvedTyPtr> newParams;
+        for (auto& pt : ty->funcParamTypes) {
+            auto np = applySubst(pt, subst);
+            if (np != pt) changed = true;
+            newParams.push_back(np);
+        }
+        auto newRet = ty->funcRetType ? applySubst(ty->funcRetType, subst) : ty->funcRetType;
+        if (newRet != ty->funcRetType) changed = true;
+        if (!changed) return ty;
+        return Ty::FuncPtr(std::move(newParams), newRet);
+    }
     return ty;
 }
 
@@ -237,6 +277,14 @@ ResolvedTyPtr TypeResolver::resolve(const TypeNode& tn, const SubstMap& subst) c
 
         if constexpr (std::is_same_v<T, HashType>) {
             return Ty::Void();
+        }
+
+        if constexpr (std::is_same_v<T, FuncType>) {
+            std::vector<ResolvedTyPtr> paramTys;
+            for (auto& pt : x.paramTypes)
+                paramTys.push_back(pt ? resolve(*pt, subst) : Ty::Void());
+            auto retTy = x.retType ? resolve(*x.retType, subst) : Ty::Void();
+            return Ty::FuncPtr(std::move(paramTys), retTy);
         }
 
         if constexpr (std::is_same_v<T, PtrType>) {
@@ -280,7 +328,21 @@ ResolvedTyPtr TypeResolver::resolve(const TypeNode& tn, const SubstMap& subst) c
             {
                 auto sit = structs_.find(x.name);
                 if (sit != structs_.end()) {
-                    return Ty::Named(TyKind::Struct, x.name);
+                    auto& info = sit->second;
+                    if (!info->typeParams.empty() &&
+                        x.typeArgs.size() != info->typeParams.size()) {
+                        diag_.error(tn.loc,
+                                    std::format("struct '{}' expects {} type argument(s), got {}",
+                                                x.name,
+                                                info->typeParams.size(),
+                                                x.typeArgs.size()),
+                                    lineFor(tn.loc));
+                        return Ty::I32();
+                    }
+                    auto t = Ty::Named(TyKind::Struct, x.name);
+                    for (auto& ta : x.typeArgs)
+                        t->typeArgs.push_back(resolve(*ta, subst));
+                    return t;
                 }
             }
 

@@ -20,6 +20,7 @@ enum class TK {
     Nomd,
     Readonly, Take, Release, Crumble,
     For,
+    Fn,
 
     Ident,
 
@@ -100,6 +101,7 @@ inline std::string tkName(TK k) {
     case TK::Release:      return "release";
     case TK::Crumble:      return "crumble";
     case TK::For:          return "for";
+    case TK::Fn:           return "fn";
     case TK::Ident:        return "identifier";
     case TK::Plus:         return "+";
     case TK::Minus:        return "-";

@@ -127,6 +127,22 @@ void Parser::parseTopLevel(Program& prog) {
         return;
     }
 
+    if (k == TK::Ident && check(TK::Lt, 1)) {
+        size_t scan = pos_ + 2;
+        int depth = 1;
+        while (scan < toks_.size() && depth > 0) {
+            TK tk = toks_[scan].kind;
+            if      (tk == TK::Lt)  ++depth;
+            else if (tk == TK::Gt)  { if (--depth == 0) { ++scan; break; } }
+            else if (tk == TK::Eof || tk == TK::Semi) break;
+            ++scan;
+        }
+        if (depth == 0 && scan < toks_.size() && toks_[scan].kind == TK::Lparen) {
+            prog.funcs.push_back(parseFuncDecl());
+            return;
+        }
+    }
+
     if (isTypeStart()) {
         prog.globals.push_back(parseGlobalDecl());
         return;
@@ -195,6 +211,14 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(bool packed) {
     sd->packed = packed;
     sd->loc    = cur().loc;
     sd->name   = expect(TK::Ident, "expected struct name").text;
+
+    if (match(TK::Lt)) {
+        do {
+            sd->typeParams.push_back(expect(TK::Ident, "expected type parameter").text);
+        } while (match(TK::Comma));
+        expect(TK::Gt, "expected '>' after struct type parameters");
+    }
+
     expect(TK::Lbrace, "expected '{' after struct name");
 
     while (!check(TK::Rbrace) && !atEnd()) {
@@ -248,6 +272,27 @@ std::unique_ptr<FuncDecl> Parser::parseFuncDecl() {
 
     genericParamsInScope_.clear();
 
+    if (check(TK::Lt)) {
+        size_t saved = pos_;
+        consume();
+        bool isGenericList = true;
+        std::vector<std::string> explicitParams;
+        while (!atEnd() && !check(TK::Gt)) {
+            if (!check(TK::Ident)) { isGenericList = false; break; }
+            explicitParams.push_back(consume().text);
+            if (!match(TK::Comma)) break;
+        }
+        if (isGenericList && check(TK::Gt)) {
+            consume();
+            for (auto& p : explicitParams) {
+                fd->genericParams.push_back(p);
+                genericParamsInScope_.insert(p);
+            }
+        } else {
+            pos_ = saved;
+        }
+    }
+
     expect(TK::Lparen, "expected '(' after function name");
     fd->params = parseParamList();
     expect(TK::Rparen, "expected ')' after parameters");
@@ -264,8 +309,10 @@ std::unique_ptr<FuncDecl> Parser::parseFuncDecl() {
         if (p.type && p.type->isNamed()) {
             auto& nt = p.type->asNamed();
             if (nt.name.size() == 1 && std::isupper(nt.name[0])) {
-                fd->genericParams.push_back(nt.name);
-                genericParamsInScope_.insert(nt.name);
+                if (!genericParamsInScope_.count(nt.name)) {
+                    fd->genericParams.push_back(nt.name);
+                    genericParamsInScope_.insert(nt.name);
+                }
             }
         }
     }
@@ -392,6 +439,7 @@ bool Parser::isTypeStart(int offset) const {
     || k == TK::F32 || k == TK::F64
     || k == TK::Void
     || k == TK::Hash
+    || k == TK::Fn
     || (k == TK::Ident);
 }
 
@@ -447,6 +495,28 @@ TypeNodePtr Parser::parseBaseType() {
         case TK::F64:  makePrim(PrimKind::F64);      break;
         case TK::Void: makePrim(PrimKind::Void);     break;
         case TK::Hash: consume(); t->v = HashType{}; break;
+        case TK::Fn: {
+            consume();
+            expect(TK::Lparen, "expected '(' after 'fn' in function type");
+            FuncType ft;
+            if (!check(TK::Rparen)) {
+                ft.paramTypes.push_back(parseType());
+                while (match(TK::Comma)) {
+                    if (check(TK::Rparen)) break;
+                    ft.paramTypes.push_back(parseType());
+                }
+            }
+            expect(TK::Rparen, "expected ')' after function type parameters");
+            if (isTypeStart()) {
+                ft.retType = parseType();
+            } else {
+                auto vt = std::make_unique<TypeNode>();
+                vt->v = PrimType{PrimKind::Void};
+                ft.retType = std::move(vt);
+            }
+            t->v = std::move(ft);
+            break;
+        }
         case TK::Ident: {
             NamedType nt;
             nt.name = consume().text;
@@ -948,6 +1018,25 @@ ExprPtr Parser::parsePostfix(ExprPtr base) {
             continue;
         }
 
+        if (check(TK::Lparen) && !base->is<IdentExpr>()) {
+            consume();
+            CallExpr call;
+            call.callee = std::move(base);
+            if (!check(TK::Rparen)) {
+                call.args.push_back(parseExpr());
+                while (match(TK::Comma)) {
+                    if (check(TK::Rparen)) break;
+                    call.args.push_back(parseExpr());
+                }
+            }
+            expect(TK::Rparen, "expected ')'");
+            auto e = std::make_unique<Expr>();
+            e->loc = loc;
+            e->v   = std::move(call);
+            base   = std::move(e);
+            continue;
+        }
+
         break;
     }
     return base;
@@ -1056,6 +1145,26 @@ ExprPtr Parser::parsePrimary() {
 
         if (check(TK::Lbrace) && !noStructInit_) {
             return parseStructInit(std::move(name), loc);
+        }
+
+        if (check(TK::Lt) && !noStructInit_) {
+            size_t depth = 0, scan = pos_;
+            bool isGenericStructInit = false;
+            if (toks_[scan].kind == TK::Lt) {
+                ++scan; ++depth;
+                while (scan < toks_.size() && depth > 0) {
+                    TK k = toks_[scan].kind;
+                    if      (k == TK::Lt)  ++depth;
+                    else if (k == TK::Gt)  { --depth; if (depth == 0) { ++scan; break; } }
+                    else if (k == TK::Eof || k == TK::Semi) break;
+                    ++scan;
+                }
+                if (depth == 0 && scan < toks_.size() && toks_[scan].kind == TK::Lbrace)
+                    isGenericStructInit = true;
+            }
+            if (isGenericStructInit) {
+                return parseStructInit(std::move(name), loc);
+            }
         }
 
         bool isCall       = check(TK::Lparen);
@@ -1213,7 +1322,10 @@ ExprPtr Parser::parseMatchExpr() {
     consume();
 
     bool hasParen = match(TK::Lparen);
+    bool savedNSI = noStructInit_;
+    noStructInit_ = true;
     auto subject = parseExpr();
+    noStructInit_ = savedNSI;
     if (hasParen) expect(TK::Rparen, "expected ')'");
 
     expect(TK::Lbrace, "expected '{'");

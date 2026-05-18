@@ -71,6 +71,7 @@ void CodeGen::emitTypeDecls() {
         emitOpaqueType(name);
     }
     for (auto& [name, info] : sema_.structs()) {
+        if (!info->typeParams.empty()) continue;
         emitStructType(name);
     }
     for (auto& [name, info] : sema_.enums()) {

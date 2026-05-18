@@ -48,6 +48,7 @@ static const std::unordered_map<std::string, TK> keywords = {
     {"void",       TK::Void},
     {"extern",     TK::Extern},
     {"unsafe",     TK::Unsafe},
+    {"fn",         TK::Fn},
 };
 
 Lexer::Lexer(std::string src, std::string filename, DiagEngine& diag)

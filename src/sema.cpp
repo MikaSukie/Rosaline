@@ -122,6 +122,7 @@ void SemaPass::collectStructNames() {
         auto info = std::make_shared<StructTypeInfo>();
         info->name   = sd->name;
         info->packed = sd->packed;
+        info->typeParams = sd->typeParams;
         for (auto& f : sd->fields)
             info->fieldNames.push_back(f.name);
         structs_[sd->name] = info;
@@ -139,8 +140,11 @@ void SemaPass::resolveStructFields() {
             if (it != constIntGlobals_.end()) return it->second;
             return std::nullopt;
         });
+        SubstMap genericSubst;
+        for (auto& tp : sd->typeParams)
+            genericSubst[tp] = Ty::Generic(tp);
         for (auto& f : sd->fields) {
-            auto ft = tmpRes.resolve(*f.type);
+            auto ft = tmpRes.resolve(*f.type, genericSubst);
             if (containsIllegalStorageType(ft)) {
                 diag_.error(f.loc,
                     std::format("field '{}' of struct '{}' has an illegal storage type '{}'; "
@@ -967,6 +971,18 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, AddressOfExpr>) {
+            if (x.operand->template is<IdentExpr>()) {
+                auto& name = x.operand->template as<IdentExpr>().name;
+                auto fit = funcs_.find(name);
+                if (fit != funcs_.end()) {
+                    auto& sig = fit->second;
+                    std::vector<ResolvedTyPtr> paramTys;
+                    if (sig.decl)
+                        for (auto& p : sig.decl->params)
+                            if (p.type) paramTys.push_back(resolveType(*p.type, subst));
+                    return Ty::FuncPtr(std::move(paramTys), sig.retType);
+                }
+            }
             auto t = checkExpr(*x.operand, scope, handles, subst);
             return Ty::Ptr(t);
         }
@@ -991,6 +1007,36 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 fname = x.callee->template as<IdentExpr>().name;
             else
                 fname = "<expr>";
+
+            if (fname == "<expr>") {
+                auto calleeTy = checkExpr(*x.callee, scope, handles, subst);
+                for (auto& a : x.args) checkExpr(*a, scope, handles, subst);
+                if (calleeTy && calleeTy->isFuncPtr()) {
+                    if (x.args.size() != calleeTy->funcParamTypes.size()) {
+                        diag_.error(e.loc,
+                            std::format("indirect call: expected {} argument(s), got {}",
+                                calleeTy->funcParamTypes.size(), x.args.size()),
+                            lineFor(e.loc));
+                    }
+                    return calleeTy->funcRetType ? calleeTy->funcRetType : Ty::Void();
+                }
+                return calleeTy && !calleeTy->isVoid() ? calleeTy : Ty::I32();
+            }
+
+            {
+                auto* varInfo = scope.lookup(fname);
+                if (varInfo && varInfo->type && varInfo->type->isFuncPtr()) {
+                    auto& fpty = varInfo->type;
+                    for (auto& a : x.args) checkExpr(*a, scope, handles, subst);
+                    if (x.args.size() != fpty->funcParamTypes.size()) {
+                        diag_.error(e.loc,
+                            std::format("indirect call: expected {} argument(s), got {}",
+                                fpty->funcParamTypes.size(), x.args.size()),
+                            lineFor(e.loc));
+                    }
+                    return fpty->funcRetType ? fpty->funcRetType : Ty::Void();
+                }
+            }
 
             if (fname == "len") {
                 if (x.args.size() != 1) {
@@ -1385,8 +1431,12 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
 
         if constexpr (std::is_same_v<T, MatchExpr>) {
             auto subjTy = checkExpr(*x.subject, scope, handles, subst);
+            bool hasWildcard = false;
+            std::unordered_set<std::string> coveredVariants;
+
             for (auto& arm : x.arms) {
                 scope.push();
+                if (arm.isWildcard) hasWildcard = true;
                 if (subjTy && subjTy->isEnum()) {
                     auto eit = enums_.find(subjTy->name);
                     if (eit != enums_.end()) {
@@ -1399,6 +1449,8 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                                 std::format("unknown variant '{}' in enum '{}' (known: {})",
                                     arm.variantName, subjTy->name, knownVariants),
                                 lineFor(arm.loc));
+                        } else if (vi >= 0) {
+                            coveredVariants.insert(arm.variantName);
                         }
                     }
                 }
@@ -1430,6 +1482,27 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     checkStmt(*s2, scope, currentRetTy_, armReturns, handles, subst);
                 scope.pop();
             }
+
+            if (subjTy && subjTy->isEnum() && !hasWildcard) {
+                auto eit = enums_.find(subjTy->name);
+                if (eit != enums_.end()) {
+                    std::vector<std::string> missing;
+                    for (auto& v : eit->second->variants) {
+                        if (!coveredVariants.count(v.name))
+                            missing.push_back(v.name);
+                    }
+                    if (!missing.empty()) {
+                        std::string missStr;
+                        for (auto& m : missing)
+                            missStr += (missStr.empty() ? "" : ", ") + m;
+                        diag_.error(e.loc,
+                            std::format("non-exhaustive match on enum '{}': missing variant(s): {}",
+                                subjTy->name, missStr),
+                            lineFor(e.loc));
+                    }
+                }
+            }
+
             return Ty::Void();
         }
 
@@ -1460,6 +1533,12 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     lineFor(e.loc));
         }
 
+        SubstMap structSubst = subst;
+        if (info && !info->typeParams.empty() && structTy && !structTy->typeArgs.empty()) {
+            for (size_t i = 0; i < info->typeParams.size() && i < structTy->typeArgs.size(); ++i)
+                structSubst[info->typeParams[i]] = structTy->typeArgs[i];
+        }
+
         for (auto& f : x.fields) {
             if (info) {
                 int idx = info->fieldIndex(f.name);
@@ -1471,9 +1550,9 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     continue;
                 }
 
-                auto expectedFTy = applySubst(info->fieldTypes[idx], subst);
+                auto expectedFTy = applySubst(info->fieldTypes[idx], structSubst);
 
-                SubstMap fieldSubst = subst;
+                SubstMap fieldSubst = structSubst;
                 if (expectedFTy && !expectedFTy->isGeneric())
                     fieldSubst["#ctx"] = expectedFTy;
 
@@ -1492,7 +1571,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     }
                 }
             } else {
-                checkExpr(*f.value, scope, handles, subst);
+                checkExpr(*f.value, scope, handles, structSubst);
             }
         }
 

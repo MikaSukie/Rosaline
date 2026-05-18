@@ -24,22 +24,28 @@ struct NamedType { std::string name; std::vector<TypeNodePtr> typeArgs; };
 struct PtrType   { TypeNodePtr inner; };
 struct ArrayType { TypeNodePtr elem; ExprPtr size; };
 struct HashType  {};
+struct FuncType  {
+    std::vector<TypeNodePtr> paramTypes;
+    TypeNodePtr              retType;
+};
 
 struct TypeNode {
     SourceLoc loc;
-    std::variant<PrimType, NamedType, PtrType, ArrayType, HashType> v;
+    std::variant<PrimType, NamedType, PtrType, ArrayType, HashType, FuncType> v;
 
     bool isPrim() const   { return std::holds_alternative<PrimType>(v);  }
     bool isNamed() const  { return std::holds_alternative<NamedType>(v); }
     bool isPtr() const    { return std::holds_alternative<PtrType>(v);   }
     bool isArray() const  { return std::holds_alternative<ArrayType>(v); }
     bool isHash() const   { return std::holds_alternative<HashType>(v);  }
+    bool isFuncType() const { return std::holds_alternative<FuncType>(v); }
     bool isVoid() const   { return isPrim() && std::get<PrimType>(v).kind == PrimKind::Void; }
 
     const PrimType&  asPrim()  const { return std::get<PrimType>(v); }
     const NamedType& asNamed() const { return std::get<NamedType>(v);}
     const PtrType&   asPtr()   const { return std::get<PtrType>(v);  }
     const ArrayType& asArray() const { return std::get<ArrayType>(v);}
+    const FuncType&  asFuncType() const { return std::get<FuncType>(v); }
 
     TypeNodePtr clone() const;
 
@@ -62,6 +68,7 @@ struct StructField {
 struct StructDecl {
     std::string              name;
     bool                     packed = false;
+    std::vector<std::string> typeParams;
     std::vector<StructField> fields;
     SourceLoc                loc;
 };
@@ -360,6 +367,15 @@ inline std::string TypeNode::str() const {
             return x.inner->str() + "*";
         } else if constexpr (std::is_same_v<T, ArrayType>) {
             return x.elem->str() + "[]";
+        } else if constexpr (std::is_same_v<T, FuncType>) {
+            std::string s = "fn(";
+            for (size_t i = 0; i < x.paramTypes.size(); ++i) {
+                if (i) s += ",";
+                s += x.paramTypes[i]->str();
+            }
+            s += ")->";
+            s += x.retType ? x.retType->str() : "#";
+            return s;
         } else if constexpr (std::is_same_v<T, HashType>) {
             return "#";
         }
@@ -386,6 +402,12 @@ inline TypeNodePtr TypeNode::clone() const {
             ArrayType at;
             at.elem = x.elem->clone();
             return at;
+        } else if constexpr (std::is_same_v<T, FuncType>) {
+            FuncType ft;
+            for (auto& pt : x.paramTypes)
+                ft.paramTypes.push_back(pt->clone());
+            if (x.retType) ft.retType = x.retType->clone();
+            return ft;
         } else if constexpr (std::is_same_v<T, HashType>) {
             return HashType{};
         }

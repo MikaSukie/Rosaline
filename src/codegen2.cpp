@@ -103,6 +103,11 @@ std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
 
 std::string CodeGen::llvmTy(const ResolvedTyPtr& t) const {
     if (!t) return "i32";
+    if (t->isStruct() && !t->typeArgs.empty()) {
+        std::string mangledName = t->name;
+        for (auto& ta : t->typeArgs) mangledName += "_" + ta->mangle();
+        return "%" + mangledName;
+    }
     return t->llvmType();
 }
 
@@ -182,8 +187,32 @@ void CodeGen::ensureTypeEmitted(const ResolvedTyPtr& ty, const SubstMap& subst) 
         auto sit = sema_.structs().find(ty->name);
         if (sit == sema_.structs().end()) return;
         auto& info = *sit->second;
-        for (auto& ft : info.fieldTypes)
-            ensureTypeEmitted(ft, subst);
+
+        if (!info.typeParams.empty() && !ty->typeArgs.empty()) {
+            std::string mangledName = ty->name;
+            for (auto& ta : ty->typeArgs) mangledName += "_" + ta->mangle();
+
+            if (!emittedTypes_.count(mangledName)) {
+                emittedTypes_.insert(mangledName);
+                SubstMap structSubst = subst;
+                for (size_t i = 0; i < info.typeParams.size() && i < ty->typeArgs.size(); ++i)
+                    structSubst[info.typeParams[i]] = ty->typeArgs[i];
+                for (auto& ft : info.fieldTypes)
+                    ensureTypeEmitted(applySubst(ft, structSubst), structSubst);
+                std::string fields;
+                for (size_t i = 0; i < info.fieldTypes.size(); ++i) {
+                    if (i) fields += ", ";
+                    fields += llvmTy(applySubst(info.fieldTypes[i], structSubst));
+                }
+                if (info.packed)
+                    out_ << "%" << mangledName << " = type <{ " << fields << " }>\n";
+                else
+                    out_ << "%" << mangledName << " = type { " << fields << " }\n";
+            }
+        } else if (info.typeParams.empty()) {
+            
+            emitStructType(ty->name);
+        }
         return;
     }
 
@@ -400,8 +429,12 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
         }
         if constexpr (std::is_same_v<T, CallExpr>) {
             if (x.callee->template is<IdentExpr>()) {
+                auto& nm = x.callee->template as<IdentExpr>().name;
+                auto tyit = varTypes_.find(nm);
+                if (tyit != varTypes_.end() && tyit->second && tyit->second->isFuncPtr())
+                    return tyit->second->funcRetType ? tyit->second->funcRetType : Ty::Void();
                 auto& funcs = sema_.funcs();
-                auto it = funcs.find(x.callee->template as<IdentExpr>().name);
+                auto it = funcs.find(nm);
                 if (it != funcs.end()) {
                     if (it->second.decl &&
                         it->second.decl->retType &&
@@ -412,6 +445,10 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                     }
                     return it->second.retType;
                 }
+            } else {
+                auto calleeTy = exprType(*x.callee);
+                if (calleeTy && calleeTy->isFuncPtr())
+                    return calleeTy->funcRetType ? calleeTy->funcRetType : Ty::Void();
             }
             return Ty::I32();
         }
@@ -469,7 +506,18 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 auto it = structs.find(ot->name);
                 if (it != structs.end()) {
                     int idx = it->second->fieldIndex(x.field);
-                    if (idx >= 0) return it->second->fieldTypes[idx];
+                    if (idx >= 0) {
+                        auto& info = *it->second;
+                        auto rawTy = info.fieldTypes[idx];
+                        if (!info.typeParams.empty() && !ot->typeArgs.empty()) {
+                            SubstMap structSubst = currentSubst_;
+                            for (size_t i = 0;
+                                 i < info.typeParams.size() && i < ot->typeArgs.size(); ++i)
+                                structSubst[info.typeParams[i]] = ot->typeArgs[i];
+                            return applySubst(rawTy, structSubst);
+                        }
+                        return rawTy;
+                    }
                 }
             }
             return Ty::I32();
@@ -487,6 +535,17 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             return Ty::I32();
         }
         if constexpr (std::is_same_v<T, AddressOfExpr>) {
+            if (x.operand->template is<IdentExpr>()) {
+                auto& name = x.operand->template as<IdentExpr>().name;
+                auto fit = sema_.funcs().find(name);
+                if (fit != sema_.funcs().end()) {
+                    std::vector<ResolvedTyPtr> pts;
+                    if (fit->second.decl)
+                        for (auto& p : fit->second.decl->params)
+                            if (p.type) pts.push_back(sema_.resolveType(*p.type, currentSubst_));
+                    return Ty::FuncPtr(std::move(pts), fit->second.retType);
+                }
+            }
             return Ty::Ptr(exprType(*x.operand));
         }
         if constexpr (std::is_same_v<T, UnaryOpExpr>) {
@@ -1238,6 +1297,8 @@ std::string CodeGen::emitExpr(const Expr& e) {
         if constexpr (std::is_same_v<T, AddressOfExpr>) {
             if (x.operand->template is<IdentExpr>()) {
                 auto& id = x.operand->template as<IdentExpr>();
+                if (sema_.funcs().count(id.name))
+                    return "@" + id.name;
                 auto ait = varAlloca_.find(id.name);
                 if (ait != varAlloca_.end()) return ait->second;
                 if (isGlobalSymbol(id.name)) return "@" + id.name;
@@ -1316,6 +1377,15 @@ std::string CodeGen::emitExpr(const Expr& e) {
             }
             auto& sinfo = *sit->second;
 
+            SubstMap structSubst = currentSubst_;
+            if (!sinfo.typeParams.empty() && !ty->typeArgs.empty())
+                for (size_t i = 0; i < sinfo.typeParams.size() && i < ty->typeArgs.size(); ++i)
+                    structSubst[sinfo.typeParams[i]] = ty->typeArgs[i];
+
+            std::string llvmStructName = ty->name;
+            if (!ty->typeArgs.empty())
+                for (auto& ta : ty->typeArgs) llvmStructName += "_" + ta->mangle();
+
             std::unordered_map<std::string, bool> seen;
 
             std::string ptr = newTmp();
@@ -1337,10 +1407,10 @@ std::string CodeGen::emitExpr(const Expr& e) {
                     continue;
                 }
 
-                auto fty = sinfo.fieldTypes[idx];
+                auto fty = applySubst(sinfo.fieldTypes[idx], structSubst);
 
                 std::string fp = newTmp();
-                line("  " + fp + " = getelementptr inbounds %" + ty->name +
+                line("  " + fp + " = getelementptr inbounds %" + llvmStructName +
                     ", ptr " + ptr + ", i32 0, i32 " + std::to_string(idx));
 
                 SubstMap savedSubst = currentSubst_;
@@ -2181,7 +2251,16 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
             return "undef";
         }
 
-        auto fty = sit->second->fieldTypes[idx];
+        SubstMap structSubst = currentSubst_;
+        auto& sinfo2 = *sit->second;
+        if (!sinfo2.typeParams.empty() && !oty->typeArgs.empty())
+            for (size_t i = 0; i < sinfo2.typeParams.size() && i < oty->typeArgs.size(); ++i)
+                structSubst[sinfo2.typeParams[i]] = oty->typeArgs[i];
+        auto fty = applySubst(sinfo2.fieldTypes[idx], structSubst);
+
+        std::string llvmStructName = oty->name;
+        if (!oty->typeArgs.empty())
+            for (auto& ta : oty->typeArgs) llvmStructName += "_" + ta->mangle();
 
         auto resolveBase = [&](const std::string& allocaPtr) -> std::string {
             if (!autoDeref) return allocaPtr;
@@ -2202,7 +2281,7 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
 
             if (!basePtr.empty()) {
                 std::string fp = newTmp();
-                line("  " + fp + " = getelementptr inbounds %" + oty->name +
+                line("  " + fp + " = getelementptr inbounds %" + llvmStructName +
                      ", ptr " + basePtr +
                      ", i32 0, i32 " + std::to_string(idx));
 
@@ -2219,7 +2298,7 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
         std::string basePtr = objVal;
 
         std::string fp = newTmp();
-        line("  " + fp + " = getelementptr inbounds %" + oty->name +
+        line("  " + fp + " = getelementptr inbounds %" + llvmStructName +
              ", ptr " + basePtr + ", i32 0, i32 " + std::to_string(idx));
 
         if (isAggTy(fty))
@@ -2299,8 +2378,41 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     if (c.callee->template is<IdentExpr>())
         fname = c.callee->template as<IdentExpr>().name;
     else {
-        diag_.error(loc, "only direct function calls are supported");
-        return "undef";
+        auto calleeTy = exprType(*c.callee);
+        std::string fptr = emitExpr(*c.callee);
+
+        std::vector<std::string> argVals;
+        std::vector<std::string> argTys;
+        for (auto& a : c.args) {
+            argVals.push_back(emitExpr(*a));
+            auto aty = exprType(*a);
+            argTys.push_back(aty ? llvmTy(aty) : "i32");
+        }
+
+        std::string retLLVM = "i32";
+        if (calleeTy && calleeTy->isFuncPtr() && calleeTy->funcRetType)
+            retLLVM = llvmTy(calleeTy->funcRetType);
+
+        std::string fnSig = retLLVM + " (";
+        for (size_t i = 0; i < argTys.size(); ++i) {
+            if (i) fnSig += ", ";
+            fnSig += argTys[i];
+        }
+        fnSig += ")";
+
+        std::string args;
+        for (size_t i = 0; i < argVals.size(); ++i) {
+            if (i) args += ", ";
+            args += argTys[i] + " " + argVals[i];
+        }
+
+        if (retLLVM == "void") {
+            line("  call " + fnSig + " " + fptr + "(" + args + ")");
+            return "0";
+        }
+        std::string tmp = newTmp();
+        line("  " + tmp + " = call " + fnSig + " " + fptr + "(" + args + ")");
+        return tmp;
     }
 
     if (fname == "len") {
@@ -2333,10 +2445,45 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
 
     auto fit = sema_.funcs().find(fname);
     if (fit == sema_.funcs().end()) {
+        auto vit = varAlloca_.find(fname);
+        auto tyit = varTypes_.find(fname);
+        if (vit != varAlloca_.end() && tyit != varTypes_.end() &&
+            tyit->second && tyit->second->isFuncPtr()) {
+            auto& fpty = tyit->second;
+
+            std::string fptr = newTmp();
+            line("  " + fptr + " = load ptr, ptr " + vit->second);
+
+            std::vector<std::string> argVals, argTys;
+            for (auto& a : c.args) {
+                argVals.push_back(emitExpr(*a));
+                auto aty = exprType(*a);
+                argTys.push_back(aty ? llvmTy(aty) : "i32");
+            }
+
+            std::string retLLVM = fpty->funcRetType ? llvmTy(fpty->funcRetType) : "void";
+            std::string fnSig = retLLVM + " (";
+            for (size_t i = 0; i < argTys.size(); ++i) { if (i) fnSig += ", "; fnSig += argTys[i]; }
+            fnSig += ")";
+
+            std::string args;
+            for (size_t i = 0; i < argVals.size(); ++i) {
+                if (i) args += ", ";
+                args += argTys[i] + " " + argVals[i];
+            }
+
+            if (retLLVM == "void") {
+                line("  call " + fnSig + " " + fptr + "(" + args + ")");
+                return "0";
+            }
+            std::string tmp = newTmp();
+            line("  " + tmp + " = call " + fnSig + " " + fptr + "(" + args + ")");
+            return tmp;
+        }
+
         diag_.error(loc, std::format("unknown function '{}'", fname), lineFor(loc));
         return "undef";
     }
-
     ResolvedTyPtr ctxTy;
     if (fit->second.decl &&
         fit->second.decl->retType &&

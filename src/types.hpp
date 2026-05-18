@@ -17,6 +17,7 @@ enum class TyKind {
     Enum,
     Opaque,
     Generic,
+    FuncPtr,
     Error,
 };
 
@@ -31,6 +32,8 @@ struct ResolvedTy {
     std::string   name;
     std::vector<ResolvedTyPtr> typeArgs;
     std::string   genericName;
+    std::vector<ResolvedTyPtr> funcParamTypes;
+    ResolvedTyPtr              funcRetType;
 
     bool isInteger() const {
         return kind == TyKind::I8   || kind == TyKind::I16  ||
@@ -61,6 +64,7 @@ struct ResolvedTy {
     bool isOpaque() const { return kind == TyKind::Opaque;  }
     bool isGeneric()const { return kind == TyKind::Generic; }
     bool isError()  const { return kind == TyKind::Error;   }
+    bool isFuncPtr()const { return kind == TyKind::FuncPtr; }
     bool isNumeric()const { return isInteger() || isFloat();}
 
     int bitWidth() const {
@@ -151,6 +155,12 @@ namespace Ty {
         return t;
     }
     inline ResolvedTyPtr Error() { return make(TyKind::Error); }
+    inline ResolvedTyPtr FuncPtr(std::vector<ResolvedTyPtr> paramTys, ResolvedTyPtr retTy) {
+        auto t = make(TyKind::FuncPtr);
+        t->funcParamTypes = std::move(paramTys);
+        t->funcRetType    = std::move(retTy);
+        return t;
+    }
 }
 
 struct OpaqueTypeInfo {
@@ -160,6 +170,7 @@ struct OpaqueTypeInfo {
 struct StructTypeInfo {
     std::string              name;
     bool                     packed = false;
+    std::vector<std::string> typeParams;
     std::vector<std::string> fieldNames;
     std::vector<ResolvedTyPtr> fieldTypes;
 
