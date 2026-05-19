@@ -130,14 +130,17 @@ void Parser::parseTopLevel(Program& prog) {
     if (k == TK::Ident && check(TK::Lt, 1)) {
         size_t scan = pos_ + 2;
         int depth = 1;
+        bool looksLikeTypeParams = true;
         while (scan < toks_.size() && depth > 0) {
             TK tk = toks_[scan].kind;
-            if      (tk == TK::Lt)  ++depth;
-            else if (tk == TK::Gt)  { if (--depth == 0) { ++scan; break; } }
-            else if (tk == TK::Eof || tk == TK::Semi) break;
+            if (tk == TK::Lt)  { ++depth; ++scan; continue; }
+            if (tk == TK::Gt)  { if (--depth == 0) { ++scan; break; } ++scan; continue; }
+            if (tk == TK::Eof || tk == TK::Semi) { looksLikeTypeParams = false; break; }
+            if (tk != TK::Ident && tk != TK::Comma) { looksLikeTypeParams = false; break; }
             ++scan;
         }
-        if (depth == 0 && scan < toks_.size() && toks_[scan].kind == TK::Lparen) {
+        if (looksLikeTypeParams && depth == 0 &&
+            scan < toks_.size() && toks_[scan].kind == TK::Lparen) {
             prog.funcs.push_back(parseFuncDecl());
             return;
         }
@@ -454,12 +457,39 @@ bool Parser::looksLikeGenericCall() const {
     ++scan; ++depth;
     while (scan < toks_.size() && depth > 0) {
         TK k = toks_[scan].kind;
-        if      (k == TK::Lt)     ++depth;
-        else if (k == TK::Gt)     { --depth; if (depth == 0) break; }
-        else if (k == TK::Eof || k == TK::Semi || k == TK::Lbrace ||
-            k == TK::Rbrace) return false;
+        switch (k) {
+            case TK::Lt:  ++depth; break;
+            case TK::Gt:  --depth; if (depth == 0) goto done; break;
+
+            case TK::Eof:
+            case TK::Semi:
+            case TK::Lbrace:
+            case TK::Rbrace:
+            case TK::Lbracket:
+                return false;
+            case TK::Arrow:
+            case TK::Assign:
+            case TK::PlusAssign: case TK::MinusAssign:
+            case TK::StarAssign:  case TK::SlashAssign: case TK::PercentAssign:
+            case TK::AmpAssign:   case TK::PipeAssign:  case TK::CaretAssign:
+            case TK::LshiftAssign: case TK::RshiftAssign:
+            case TK::Or:
+            case TK::And:
+            case TK::Eq:
+            case TK::Neq:
+            case TK::Leq:
+            case TK::Geq:
+            case TK::Plus: case TK::Minus:
+            case TK::Slash: case TK::Percent:
+            case TK::IntLit: case TK::FloatLit:
+            case TK::StringLit: case TK::CharLit:
+            case TK::True: case TK::False:
+                return false;
+            default: break;
+        }
         ++scan;
     }
+    done:
     if (depth != 0) return false;
     ++scan;
     if (scan >= toks_.size()) return false;
