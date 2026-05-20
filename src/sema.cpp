@@ -1244,8 +1244,9 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                                 idxTy->str()),
                     lineFor(x.idx->loc));
             }
+            if (arrTy && arrTy->isStr())   return Ty::Char();
             if (arrTy && arrTy->isArray()) return arrTy->elemTy;
-            if (arrTy && arrTy->isPtr()) return arrTy->inner ? arrTy->inner : Ty::I8();
+            if (arrTy && arrTy->isPtr())   return arrTy->inner ? arrTy->inner : Ty::I8();
             return Ty::I32();
         }
 
