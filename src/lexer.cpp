@@ -378,6 +378,9 @@ Token Lexer::lexDirective(int sL, int sC) {
     } else if (name == "nomain") {
         t.kind = TK::DirNoMain;
         t.text = "@nomain";
+    } else if (name == "asm") {
+        t.kind = TK::DirAsm;
+        t.text = "@asm";
     } else {
         t.kind = TK::At;
         t.text = "@" + name;

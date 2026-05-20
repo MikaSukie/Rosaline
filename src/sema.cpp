@@ -757,6 +757,13 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
             return Ty::Void();
         }
 
+        if constexpr (std::is_same_v<T, AsmBlockStmt>) {
+            diag_.warning(s.loc,
+                "inline assembly block (@asm) bypasses all type safety and ownership checks",
+                lineFor(s.loc));
+            return Ty::Void();
+        }
+
         return Ty::Void();
     }, s.v);
 }

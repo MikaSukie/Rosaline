@@ -225,6 +225,13 @@ struct ReturnStmt   { ExprPtr value;};
 struct BreakStmt    {};
 struct ContinueStmt {};
 
+struct AsmBlockStmt {
+    std::string asmTemplate;
+    std::string constraints;
+    std::string clobbers;
+    bool        isVolatile = true;
+};
+
 struct VarDeclStmt {
     bool        nomd = false;
     TypeNodePtr type;
@@ -247,7 +254,7 @@ struct Stmt {
     SourceLoc loc;
     std::variant<
         ExprStmt, BlockStmt, ReturnStmt, BreakStmt, ContinueStmt,
-        VarDeclStmt, IfStmt, WhileStmt
+        VarDeclStmt, IfStmt, WhileStmt, AsmBlockStmt
     > v;
 
     template<typename T>

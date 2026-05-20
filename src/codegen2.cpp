@@ -860,6 +860,26 @@ void CodeGen::emitStmt(const Stmt& s) {
             for (auto& st : x.stmts) emitStmt(*st);
             popAndEmitDrops();
         }
+        else if constexpr (std::is_same_v<T, AsmBlockStmt>) {
+            std::string escaped;
+            for (unsigned char ch : x.asmTemplate) {
+                if (ch == '"')       escaped += "\\22";
+                else if (ch == '\\') escaped += "\\5C";
+                else if (ch == '\n') escaped += "\\0A";
+                else if (ch == '\r') escaped += "";
+                else                 escaped += (char)ch;
+            }
+
+            std::string llvmConstraints = x.constraints.empty() ? "" : x.constraints;
+            if (!x.clobbers.empty()) {
+                if (!llvmConstraints.empty()) llvmConstraints += ",";
+                llvmConstraints += x.clobbers;
+            }
+
+            std::string vol = x.isVolatile ? "sideeffect " : "";
+            line("  call void asm " + vol + "\"" + escaped + "\", \""
+                 + llvmConstraints + "\"()");
+        }
     }, s.v);
 }
 

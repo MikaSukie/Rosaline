@@ -619,6 +619,45 @@ StmtPtr Parser::parseStmt() {
 
     if (check(TK::Return)) return parseReturn();
 
+    if (check(TK::DirAsm)) {
+        consume();
+        expect(TK::Lbrace, "expected '{' after '@asm'");
+
+        AsmBlockStmt ab;
+        ab.isVolatile = true;
+
+        if (check(TK::StringLit)) {
+            ab.asmTemplate = cur().text;
+            consume();
+        } else {
+            diag_.error(cur().loc,
+                "expected string literal for asm template inside '@asm { ... }'",
+                lineFor(cur().loc));
+            ab.asmTemplate = "";
+        }
+
+        if (match(TK::Colon)) {
+            if (check(TK::StringLit)) {
+                ab.constraints = cur().text;
+                consume();
+            }
+            if (match(TK::Colon)) {
+                if (check(TK::StringLit)) {
+                    ab.clobbers = cur().text;
+                    consume();
+                }
+            }
+        }
+
+        expect(TK::Rbrace, "expected '}' to close '@asm' block");
+        expect(TK::Semi,   "expected ';' after '@asm { ... }'");
+
+        auto s = std::make_unique<Stmt>();
+        s->loc = sLoc;
+        s->v   = std::move(ab);
+        return s;
+    }
+
     if (check(TK::Break)) {
         consume();
         expect(TK::Semi, "expected ';' after 'break'");
