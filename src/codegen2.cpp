@@ -2567,9 +2567,10 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     enum class TransientKind { None, Str };
 
     struct ArgInfo {
-        std::string    val;
-        ResolvedTyPtr  ty;
-        TransientKind  transient = TransientKind::None;
+        std::string             val;
+        ResolvedTyPtr           ty;
+        TransientKind           transient = TransientKind::None;
+        std::vector<std::string> freeAfterCall;
     };
 
     auto isTransientStrArg = [&](const Expr& e) -> bool {
@@ -2629,6 +2630,13 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             }
         }
 
+        std::string originalVal = ai.val;
+
+        if (isTransientStrArg(*c.args[i])) {
+            ai.transient = TransientKind::Str;
+            ai.freeAfterCall.push_back(originalVal);
+        }
+
         if (externDeclForCall && externDeclForCall->isUnsafe && ai.ty &&
             (ai.ty->isStr() || ai.ty->isPtr())) {
             bool paramIsNomd = (i < externDeclForCall->params.size()) &&
@@ -2642,6 +2650,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
                 line("  " + buf  + " = call ptr @malloc(i64 " + len1 + ")");
                 line("  call void @strcpy(ptr " + buf + ", ptr " + ai.val + ")");
                 ai.val = buf;
+                ai.freeAfterCall.push_back(buf);
             }
         }
 
@@ -2653,9 +2662,6 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             ai.val = promoted;
             ai.ty  = Ty::F64();
         }
-
-        if (isTransientStrArg(*c.args[i]))
-            ai.transient = TransientKind::Str;
 
         argInfos.push_back(std::move(ai));
     }
@@ -2863,8 +2869,8 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     }
 
     for (auto& ai : argInfos) {
-        if (ai.transient == TransientKind::Str)
-            emitStrFree(ai.val);
+        for (auto it = ai.freeAfterCall.rbegin(); it != ai.freeAfterCall.rend(); ++it)
+            emitStrFree(*it);
     }
 
     {
@@ -3296,6 +3302,7 @@ void CodeGen::emitEnumPayloadDrop(const std::string& varName,
             std::string fval = newTmp();
             line("  " + fval + " = load ptr, ptr " + fptr);
             emitStrFree(fval);
+            line("  store ptr null, ptr " + fptr + ", align 8");
         }
 
         line("  br label %" + skipLbl);
