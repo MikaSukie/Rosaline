@@ -912,6 +912,14 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             }
             auto rt = checkExpr(*x.rhs, scope, handles, binSubst);
             if (x.op == "+" && lt && lt->isStr() && rt && rt->isStr()) return Ty::Str();
+            {
+                auto isRawBytePtr = [](const ResolvedTyPtr& t) -> bool {
+                    if (!t || !t->isPtr()) return false;
+                    return !t->inner || t->inner->isVoid() || t->inner->kind == TyKind::I8;
+                };
+                if ((x.op == "+" || x.op == "-") && isRawBytePtr(lt) && rt && rt->isInteger())
+                    return lt;
+            }
             if (x.op == "&&" || x.op == "||") return Ty::Bool();
             if (x.op == "==" || x.op == "!=") {
                 bool ok = false;

@@ -2615,8 +2615,13 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             ai.val = emitIntLit(c.args[i]->template as<IntLitExpr>().val, expectedTy);
             ai.ty  = expectedTy;
         } else {
+            SubstMap savedArgCtx = currentSubst_;
+            if (expectedTy && !expectedTy->isGeneric() &&
+                (expectedTy->isInteger() || expectedTy->isFloat()))
+                currentSubst_["#ctx"] = expectedTy;
             ai.val = emitExpr(*c.args[i]);
             ai.ty  = exprType(*c.args[i]);
+            currentSubst_ = savedArgCtx;
 
             if (expectedTy && !expectedTy->isGeneric() && ai.ty && !ai.ty->equals(*expectedTy)) {
                 ai.val = implicitCoerce(ai.val, ai.ty, expectedTy, *fnOut_, tmpIdx_);
@@ -3376,6 +3381,10 @@ bool CodeGen::funcAlwaysAllocatesStr(const std::string& fname) const {
 
 bool CodeGen::isOwnedInit(const Expr* init) const {
     if (!init) return false;
+
+    if (init->template is<CastExpr>()) {
+        return isOwnedInit(init->template as<CastExpr>().operand.get());
+    }
 
     if (init->template is<BinOpExpr>()) {
         auto& b = init->template as<BinOpExpr>();
