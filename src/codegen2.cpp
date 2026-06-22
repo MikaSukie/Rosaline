@@ -2600,9 +2600,24 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
         return false;
     };
 
+    bool calleeReturnsMayAliasArg = false;
+    {
+        ResolvedTyPtr callRetTy = fit->second.retType;
+        if (callRetTy && callRetTy->isStr() && !funcAlwaysAllocatesStr(fname)) {
+            calleeReturnsMayAliasArg = true;
+        }
+    }
+
     const ExternDecl* externDeclForCall = nullptr;
     for (auto& ed : prog_.externs)
         if (ed->name == fname) { externDeclForCall = ed.get(); break; }
+
+    if (!calleeReturnsMayAliasArg && externDeclForCall && externDeclForCall->retType) {
+        auto extRetTy = sema_.resolveType(*externDeclForCall->retType);
+        if (extRetTy && extRetTy->isStr() && !externDeclForCall->isUnsafe) {
+            calleeReturnsMayAliasArg = true;
+        }
+    }
 
     std::vector<ArgInfo> argInfos;
     for (size_t i = 0; i < c.args.size(); ++i) {
@@ -2632,7 +2647,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
 
         std::string originalVal = ai.val;
 
-        if (isTransientStrArg(*c.args[i])) {
+        if (!calleeReturnsMayAliasArg && isTransientStrArg(*c.args[i])) {
             ai.transient = TransientKind::Str;
             ai.freeAfterCall.push_back(originalVal);
         }
