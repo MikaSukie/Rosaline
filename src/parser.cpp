@@ -199,7 +199,13 @@ std::unique_ptr<ExternDecl> Parser::parseExternDecl() {
         }
 
         expect(TK::Rparen, "expected ')' after extern parameters");
-        ed->retType = parseType();
+        if (check(TK::Semi)) {
+            auto vt = std::make_unique<TypeNode>();
+            vt->v = PrimType{PrimKind::Void};
+            ed->retType = std::move(vt);
+        } else {
+            ed->retType = parseType();
+        }
     } else {
         ed->isGlobal = true;
         ed->globalType = parseType();
