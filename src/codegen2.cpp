@@ -1650,8 +1650,15 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
             }
             if (!basePtr.empty()) {
                 auto idxTy  = exprType(*ix.idx);
-                std::string idxLLTy = (idxTy && idxTy->bitWidth() == 64) ? "i64" : "i32";
-                std::string idxVal  = emitExpr(*ix.idx);
+                std::string idxVal = emitExpr(*ix.idx);
+                if (idxTy && idxTy->isInteger() && idxTy->bitWidth() != 64) {
+                    std::string coerced = newTmp();
+                    std::string ext = idxTy->isSigned() ? "sext" : "zext";
+                    line("  " + coerced + " = " + ext + " " + llvmTy(idxTy) +
+                         " " + idxVal + " to i64");
+                    idxVal = coerced;
+                }
+                const std::string idxLLTy = "i64";
                 std::string ep = newTmp();
                 auto elemTy = (arrTy && arrTy->isArray()) ? arrTy->elemTy
                             : (arrTy && arrTy->isPtr())   ? (arrTy->inner ? arrTy->inner : Ty::I8())
