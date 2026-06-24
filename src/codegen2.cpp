@@ -531,7 +531,8 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
         }
         if constexpr (std::is_same_v<T, DerefExpr>) {
             auto t = exprType(*x.operand);
-            if (t && t->isPtr()) return t->inner ? t->inner : Ty::I32();
+            if (t && t->isPtr()) return t->inner ? t->inner : Ty::I8();
+            if (t && t->isStr()) return Ty::Char();
             return Ty::I32();
         }
         if constexpr (std::is_same_v<T, AddressOfExpr>) {
@@ -1083,6 +1084,8 @@ void CodeGen::emitIf(const IfStmt& s) {
     auto condTy = exprType(*s.cond);
     if (condTy && condTy->kind == TyKind::Bool) {
         cond1 = condVal;
+    } else if (condTy && (condTy->isPtr() || condTy->isStr())) {
+        line("  " + cond1 + " = icmp ne ptr " + condVal + ", null");
     } else {
         line("  " + cond1 + " = icmp ne " + llvmTy(condTy) + " " + condVal + ", 0");
     }
@@ -1131,7 +1134,10 @@ void CodeGen::emitWhile(const WhileStmt& s) {
     auto condTy = exprType(*s.cond);
     if (!condTy || condTy->kind != TyKind::Bool) {
         cond1 = newTmp();
-        line("  " + cond1 + " = icmp ne " + llvmTy(condTy) + " " + condVal + ", 0");
+        if (condTy && (condTy->isPtr() || condTy->isStr()))
+            line("  " + cond1 + " = icmp ne ptr " + condVal + ", null");
+        else
+            line("  " + cond1 + " = icmp ne " + llvmTy(condTy) + " " + condVal + ", 0");
     }
     line("  br i1 " + cond1 + ", label %" + bodyLbl + ", label %" + endLbl);
 
@@ -1330,8 +1336,13 @@ std::string CodeGen::emitExpr(const Expr& e) {
         if constexpr (std::is_same_v<T, DerefExpr>) {
             std::string ptr = emitExpr(*x.operand);
             auto ptrTy = exprType(*x.operand);
-            auto innerTy = (ptrTy && ptrTy->isPtr() && ptrTy->inner)
-                            ? ptrTy->inner : Ty::I8();
+            ResolvedTyPtr innerTy;
+            if (ptrTy && ptrTy->isPtr() && ptrTy->inner)
+                innerTy = ptrTy->inner;
+            else if (ptrTy && ptrTy->isStr())
+                innerTy = Ty::Char();
+            else
+                innerTy = Ty::I8();
             if (isAggTy(innerTy)) return ptr;
             std::string tmp = newTmp();
             line("  " + tmp + " = load " + llvmTy(innerTy) + ", ptr " + ptr);
@@ -1625,7 +1636,7 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
     if (e.template is<DerefExpr>()) {
         auto& operand = *e.template as<DerefExpr>().operand;
         auto operandTy = exprType(operand);
-        if (!operandTy || !operandTy->isPtr()) {
+        if (!operandTy || (!operandTy->isPtr() && !operandTy->isStr())) {
             diag_.error(loc,
                 std::format("cannot dereference expression of type '{}': "
                             "only pointers can be dereferenced, "
@@ -1751,10 +1762,15 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
         std::string tmp  = newTmp();
         std::string opStr = a.op.substr(0, a.op.size() - 1);
 
-        if (opTy && opTy->isPtr() && rty && rty->isInteger() &&
+        if (opTy && (opTy->isPtr() || opTy->isStr()) && rty &&
+            (rty->isInteger() || rty->isPtr() || rty->isStr()) &&
             (opStr == "+" || opStr == "-")) {
             std::string idx = rval;
-            if (rty->bitWidth() != 64) {
+            if (rty->isPtr() || rty->isStr()) {
+                std::string asInt = newTmp();
+                line("  " + asInt + " = ptrtoint ptr " + idx + " to i64");
+                idx = asInt;
+            } else if (rty->bitWidth() != 64) {
                 std::string c = newTmp();
                 line("  " + c + " = " + (rty->isSigned() ? "sext" : "zext") +
                      " " + llvmTy(rty) + " " + idx + " to i64");
@@ -1765,7 +1781,8 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
                 line("  " + neg + " = sub i64 0, " + idx);
                 idx = neg;
             }
-            ResolvedTyPtr elemTy = opTy->inner ? opTy->inner : Ty::I8();
+            ResolvedTyPtr elemTy = (opTy->isStr()) ? Ty::I8()
+                                 : (opTy->inner    ? opTy->inner : Ty::I8());
             std::string elemLLTy = elemTy->isVoid() ? "i8" : llvmTy(elemTy);
             std::string newPtr = newTmp();
             line("  " + newPtr + " = getelementptr inbounds " + elemLLTy +
@@ -2250,11 +2267,23 @@ std::string CodeGen::emitCast(const CastExpr& c) {
         else
             line("  " + tmp + " = fptrunc " + fll + " " + v + " to " + tll);
     } else {
-        if (fromPtr && toInt)
-            line("  " + tmp + " = ptrtoint ptr " + v + " to " + tll);
-        else if (fromInt && toPtr)
-            line("  " + tmp + " = inttoptr " + fll + " " + v + " to ptr");
-        else
+        if (fromPtr && toInt) {
+            if (toW == 64) {
+                line("  " + tmp + " = ptrtoint ptr " + v + " to i64");
+            } else {
+                std::string wide = newTmp();
+                line("  " + wide + " = ptrtoint ptr " + v + " to i64");
+                line("  " + tmp + " = trunc i64 " + wide + " to " + tll);
+            }
+        } else if (fromInt && toPtr) {
+            std::string wide = v;
+            if (fromW != 64) {
+                wide = newTmp();
+                std::string ext = fromTy->isSigned() ? "sext" : "zext";
+                line("  " + wide + " = " + ext + " " + fll + " " + v + " to i64");
+            }
+            line("  " + tmp + " = inttoptr i64 " + wide + " to ptr");
+        } else
             tmp = v;
     }
     return tmp;
