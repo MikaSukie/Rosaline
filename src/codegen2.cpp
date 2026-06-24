@@ -553,7 +553,8 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             return exprType(*x.operand);
         }
         if constexpr (std::is_same_v<T, AssignExpr>) {
-            return exprType(*x.rhs);
+            auto lhsTy = exprType(*x.lhs);
+            return lhsTy ? lhsTy : exprType(*x.rhs);
         }
         if constexpr (std::is_same_v<T, TernaryExpr>) {
             return exprType(*x.thenExpr);
