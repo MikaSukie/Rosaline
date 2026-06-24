@@ -59,6 +59,7 @@ struct FuncSig {
     bool                       isGeneric   = false;
     bool                       isVariadic  = false;
     bool                       isExtern    = false;
+    bool                       isUnsafe    = false;
     std::vector<std::string>   genericParams;
     std::vector<bool>          paramNomd;
     const FuncDecl*            decl        = nullptr;

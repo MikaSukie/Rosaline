@@ -200,6 +200,11 @@ std::unique_ptr<ExternDecl> Parser::parseExternDecl() {
 
         expect(TK::Rparen, "expected ')' after extern parameters");
         if (check(TK::Semi)) {
+            diag_.error(cur().loc,
+                std::format("extern '{}' is missing a return type; "
+                            "use 'void' if the function returns nothing",
+                            ed->name),
+                lineFor(cur().loc));
             auto vt = std::make_unique<TypeNode>();
             vt->v = PrimType{PrimKind::Void};
             ed->retType = std::move(vt);
@@ -307,6 +312,11 @@ std::unique_ptr<FuncDecl> Parser::parseFuncDecl() {
     expect(TK::Rparen, "expected ')' after parameters");
 
     if (check(TK::Lbrace)) {
+        diag_.error(cur().loc,
+            std::format("function '{}' is missing a return type; "
+                        "use 'void' if the function returns nothing",
+                        fd->name),
+            lineFor(cur().loc));
         auto vt = std::make_unique<TypeNode>();
         vt->v = PrimType{PrimKind::Void};
         fd->retType = std::move(vt);

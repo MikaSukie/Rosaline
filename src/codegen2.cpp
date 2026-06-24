@@ -2689,23 +2689,6 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             ai.freeAfterCall.push_back(originalVal);
         }
 
-        if (externDeclForCall && externDeclForCall->isUnsafe && ai.ty &&
-            (ai.ty->isStr() || ai.ty->isPtr())) {
-            bool paramIsNomd = (i < externDeclForCall->params.size()) &&
-                               externDeclForCall->params[i].nomd;
-            if (!paramIsNomd) {
-                std::string len  = newTmp();
-                std::string len1 = newTmp();
-                std::string buf  = newTmp();
-                line("  " + len  + " = call i64 @strlen(ptr " + ai.val + ")");
-                line("  " + len1 + " = add i64 " + len + ", 1");
-                line("  " + buf  + " = call ptr @malloc(i64 " + len1 + ")");
-                line("  call void @strcpy(ptr " + buf + ", ptr " + ai.val + ")");
-                ai.val = buf;
-                ai.freeAfterCall.push_back(buf);
-            }
-        }
-
         bool isVariadicArg = fit->second.isVariadic &&
                              (i >= fit->second.paramTypes.size());
         if (isVariadicArg && ai.ty && ai.ty->kind == TyKind::F32) {
@@ -2923,32 +2906,6 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     for (auto& ai : argInfos) {
         for (auto it = ai.freeAfterCall.rbegin(); it != ai.freeAfterCall.rend(); ++it)
             emitStrFree(*it);
-    }
-
-    {
-        bool calleeIsUnsafeExtern = false;
-        for (auto& ed : prog_.externs) {
-            if (ed->name == fname && ed->isUnsafe) {
-                calleeIsUnsafeExtern = true;
-                break;
-            }
-        }
-
-        if (calleeIsUnsafeExtern) {
-            for (size_t i = 0; i < c.args.size(); ++i) {
-                if (!c.args[i]->template is<IdentExpr>()) continue;
-                const std::string& argVarName =
-                    c.args[i]->template as<IdentExpr>().name;
-                for (auto& frame : dropScopes_) {
-                    frame.erase(
-                        std::remove_if(frame.begin(), frame.end(),
-                            [&](const DropEntry& de) {
-                                return de.varName == argVarName;
-                            }),
-                        frame.end());
-                }
-            }
-        }
     }
 
     return callResult;

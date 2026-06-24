@@ -266,6 +266,7 @@ void SemaPass::collectFuncs() {
         sig.name       = ed->name;
         sig.isExtern   = true;
         sig.isVariadic = ed->isVariadic;
+        sig.isUnsafe   = ed->isUnsafe;
         sig.externDecl = ed.get();
 
         for (auto& p : ed->params) {
@@ -694,6 +695,12 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
         if constexpr (std::is_same_v<T, ReturnStmt>) {
             hasReturn = true;
             if (x.value) {
+                if (x.value->template is<AssignExpr>()) {
+                    diag_.error(s.loc,
+                        "cannot return an assignment expression; "
+                        "assign to a variable first, then return it",
+                        lineFor(s.loc));
+                }
                 SubstMap retSubst = subst;
                 if (retTy && !retTy->isGeneric())
                     retSubst["#ctx"] = retTy;
@@ -716,7 +723,13 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, IfStmt>) {
-            checkExpr(*x.cond, scope, handles);
+            auto condTy = checkExpr(*x.cond, scope, handles);
+            if (condTy && !condTy->isError() && !condTy->isGeneric() &&
+                condTy->kind != TyKind::Bool) {
+                diag_.error(x.cond->loc,
+                    std::format("'if' condition must be 'bool', got '{}'", condTy->str()),
+                    lineFor(x.cond->loc));
+            }
             scope.push();
             bool tb = false, eb = false;
             std::vector<HandleInfo> thenH = handles;
@@ -737,7 +750,13 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, WhileStmt>) {
-            checkExpr(*x.cond, scope, handles);
+            auto condTy = checkExpr(*x.cond, scope, handles);
+            if (condTy && !condTy->isError() && !condTy->isGeneric() &&
+                condTy->kind != TyKind::Bool) {
+                diag_.error(x.cond->loc,
+                    std::format("'while' condition must be 'bool', got '{}'", condTy->str()),
+                    lineFor(x.cond->loc));
+            }
             scope.push();
             bool wb = false;
             ++loopDepth_;
@@ -1168,7 +1187,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
             }
 
-            if (it->second.isExtern) {
+            if (it->second.isExtern && !it->second.isUnsafe) {
                 for (size_t i = 0; i < x.args.size(); ++i) {
                     bool isNomd = (i < it->second.paramNomd.size())
                                 && it->second.paramNomd[i];
@@ -1182,6 +1201,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                         }
                     }
                 }
+            } else if (it->second.isExtern && it->second.isUnsafe) {
             } else if (it->second.decl) {
                 for (size_t i = 0; i < x.args.size(); ++i) {
                     bool paramNomd = false;
@@ -1595,7 +1615,13 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
     }
 
         if constexpr (std::is_same_v<T, TernaryExpr>) {
-            checkExpr(*x.cond, scope, handles, subst);
+            auto condTy = checkExpr(*x.cond, scope, handles, subst);
+            if (condTy && !condTy->isError() && !condTy->isGeneric() &&
+                condTy->kind != TyKind::Bool) {
+                diag_.error(x.cond->loc,
+                    std::format("ternary condition must be 'bool', got '{}'", condTy->str()),
+                    lineFor(x.cond->loc));
+            }
             auto thenTy = checkExpr(*x.thenExpr, scope, handles, subst);
             checkExpr(*x.elseExpr, scope, handles, subst);
             return thenTy ? thenTy : Ty::I32();
