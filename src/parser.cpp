@@ -115,7 +115,7 @@ void Parser::parseTopLevel(Program& prog) {
         return;
     }
 
-    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain || k == TK::DirPlat) {
+    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain || k == TK::DirPlat || k == TK::DirRaw) {
         prog.directives.push_back(parseDirective());
         return;
     }
@@ -411,6 +411,13 @@ DirectiveDecl Parser::parseDirective() {
         d.key = "nomain";
         consume();
         expectSemi("expected ';' after '@nomain'");
+        return d;
+    }
+
+    if (cur().kind == TK::DirRaw) {
+        d.key = "raw";
+        consume();
+        expectSemi("expected ';' after '@raw'");
         return d;
     }
 

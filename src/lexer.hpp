@@ -45,6 +45,7 @@ enum class TK {
     DirNoMain,
     DirAsm,
     DirPlat,
+    DirRaw,
     At,
 
     Bang2,

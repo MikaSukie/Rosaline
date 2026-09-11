@@ -559,23 +559,31 @@ void CodeGen::emitGlobalFiniBody() {
 }
 
 void CodeGen::emitBuiltins() {
-    const std::string szTy = is32bit() ? "i32" : "i64";
-    out_ << "; ==== Start of Rosaline Builtins ==== \n";
-    out_ << "declare " << szTy << "  @strlen(ptr)\n";
-    out_ << "declare ptr  @malloc(" << szTy << ")\n";
-    out_ << "declare void @free(ptr)\n";
-    out_ << "declare void @strcat(ptr, ptr)\n";
-    out_ << "declare void @strcpy(ptr, ptr)\n";
-    out_ << "declare void @memcpy(ptr, ptr, " << szTy << ")\n";
-    out_ << "declare i32  @atexit(ptr)\n";
-    out_ << "; ==== End of Rosaline Builtins ==== \n";
-    out_ << "\n";
     static const std::unordered_set<std::string> builtinNames = {
         "strlen", "malloc", "free", "strcat", "strcpy", "memcpy", "atexit"
     };
+
+    bool isRaw = false;
+    for (auto& d : prog_.directives)
+        if (d.key == "raw") { isRaw = true; break; }
+
+    if (!isRaw) {
+        const std::string szTy = is32bit() ? "i32" : "i64";
+        out_ << "; ==== Start of Rosaline Builtins ==== \n";
+        out_ << "declare " << szTy << "  @strlen(ptr)\n";
+        out_ << "declare ptr  @malloc(" << szTy << ")\n";
+        out_ << "declare void @free(ptr)\n";
+        out_ << "declare void @strcat(ptr, ptr)\n";
+        out_ << "declare void @strcpy(ptr, ptr)\n";
+        out_ << "declare void @memcpy(ptr, ptr, " << szTy << ")\n";
+        out_ << "declare i32  @atexit(ptr)\n";
+        out_ << "; ==== End of Rosaline Builtins ==== \n";
+        out_ << "\n";
+    }
+
     for (auto& ed : prog_.externs) {
         if (ed->isGlobal) continue;
-        if (builtinNames.count(ed->name)) continue;
+        if (!isRaw && builtinNames.count(ed->name)) continue;
         auto resolvedRet = ed->retType ? sema_.resolveType(*ed->retType) : nullptr;
         bool retNeedsSret = false;
         std::string retTy;
