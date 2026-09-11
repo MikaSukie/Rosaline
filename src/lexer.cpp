@@ -381,6 +381,9 @@ Token Lexer::lexDirective(int sL, int sC) {
     } else if (name == "asm") {
         t.kind = TK::DirAsm;
         t.text = "@asm";
+    } else if (name == "plat") {
+        t.kind = TK::DirPlat;
+        t.text = "@plat";
     } else {
         t.kind = TK::At;
         t.text = "@" + name;

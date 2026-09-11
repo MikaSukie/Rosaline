@@ -1,7 +1,12 @@
+# Rosaline Linux x86-64 (clang)
 CXX      := clang++
-CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -Wpedantic -fcolor-diagnostics
-MAKEFLAGS += -j$(shell nproc)
+CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -Wpedantic \
+            -fdiagnostics-color=always \
+            -pipe -MMD -MP
 LDFLAGS  :=
+
+JOBS     := $(shell nproc 2>/dev/null || echo 4)
+MAKEFLAGS += --jobs=$(JOBS)
 
 SRCDIR  := src
 BUILDDIR := build
@@ -23,37 +28,30 @@ DEPS := $(patsubst $(SRCDIR)/%.cpp,$(DEPDIR)/%.d,$(SRCS))
 
 TARGET := rosaline
 
-CXXFLAGS += -MMD -MP
-CXXFLAGS += -fdiagnostics-color=always
-
 ifdef DEBUG
   CXXFLAGS += -g -O0 -fsanitize=address,undefined -DDEBUG
   LDFLAGS  += -fsanitize=address,undefined
 endif
 
--include $(DEPS)
-
-.PHONY: all clean test asm
+.PHONY: all clean test asm asm-all help
 
 all: $(TARGET)
+
+-include $(DEPS)
 
 $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
 	@echo "Built: $@"
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp
-	@mkdir -p $(dir $@) $(DEPDIR)
-	$(CXX) $(CXXFLAGS) -MF $(patsubst $(OBJDIR)/%.o,$(DEPDIR)/%.d,$@) -c $< -o $@
+	@mkdir -p $(OBJDIR) $(DEPDIR)
+	$(CXX) $(CXXFLAGS) -MF $(DEPDIR)/$*.d -c $< -o $@
 
 asm:
 	@test -n "$(ASMFILE)" || (echo "usage: make asm ASMFILE=src/file.cpp" && exit 1)
 	@mkdir -p $(ASMDIR)
-	$(CXX) $(CXXFLAGS) -S "$(ASMFILE)" -o "$(ASMDIR)/$$(basename "$(notdir "$(ASMFILE)")" .cpp).s"
-	@echo "Wrote: $(ASMDIR)/$$(basename "$(notdir "$(ASMFILE)")" .cpp).s"
-
-test: all
-	@echo "=== Running tests ==="
-	@$(MAKE) -C tests run COMPILER=../$(TARGET) --no-print-directory
+	$(CXX) $(CXXFLAGS) -S "$(ASMFILE)" -o "$(ASMDIR)/$(notdir $(ASMFILE:.cpp=.s))"
+	@echo "Wrote: $(ASMDIR)/$(notdir $(ASMFILE:.cpp=.s))"
 
 asm-all:
 	@mkdir -p $(ASMDIR)
@@ -62,7 +60,15 @@ asm-all:
 	done
 	@echo "Wrote assembly for all sources to $(ASMDIR)/"
 
+test: all
+	@echo "=== Running tests ==="
+	@$(MAKE) -C tests run COMPILER=../$(TARGET) --no-print-directory
+
 clean:
 	rm -rf $(BUILDDIR) $(TARGET)
-	rm -f tests/*.ll tests/*.out
-	rm -f *.ll main
+	rm -f tests/*.ll tests/*.out *.ll main
+
+help:
+	@echo "Targets: all (default), clean, test, asm ASMFILE=<file>, asm-all, help"
+	@echo "Options: DEBUG=1  – add AddressSanitizer + debug info"
+	@echo "         -j<N>    – override parallelism (default: nproc=$(JOBS))"

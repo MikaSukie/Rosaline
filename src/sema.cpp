@@ -588,6 +588,7 @@ void SemaPass::checkFunc(FuncDecl& fd, const SubstMap& subst) {
     crumbleStates_.clear();
     aliases_.clear();
     lvalCtxVar_.clear();
+    ownerOpCtxVar_.clear();
 
     for (auto& s : fd.body) {
         checkStmt(*s, scope, retTy, hasReturn, handles, subst);
@@ -655,6 +656,8 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
                 vi.nomd     = x.nomd;
                 vi.declLoc  = s.loc;
 
+                uint64_t aliasSrcId = 0;
+
                 if (x.init) {
                     auto detectHandle = [&](const Expr& initExpr,
                                             std::string& srcName,
@@ -678,12 +681,20 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
                     if (x.init->template is<IdentExpr>()) {
                         const std::string& srcName =
                             x.init->template as<IdentExpr>().name;
-                        aliases_[srcName].insert(x.name);
-                        aliases_[x.name].insert(srcName);
+                        auto* srcVar = scope.lookup(srcName);
+                        if (srcVar) aliasSrcId = srcVar->instanceId;
                     }
                 }
 
                 scope.declare(x.name, std::move(vi));
+
+                if (aliasSrcId != 0) {
+                    auto* declared = scope.lookup(x.name);
+                    if (declared) {
+                        aliases_[aliasSrcId].insert(declared->instanceId);
+                        aliases_[declared->instanceId].insert(aliasSrcId);
+                    }
+                }
             }
             return Ty::Void();
         }
@@ -730,15 +741,52 @@ ResolvedTyPtr SemaPass::checkStmt(Stmt& s, Scope& scope,
                     std::format("'if' condition must be 'bool', got '{}'", condTy->str()),
                     lineFor(x.cond->loc));
             }
+            auto preSnap = scope.snapshotOwnership();
+
             scope.push();
             bool tb = false, eb = false;
             std::vector<HandleInfo> thenH = handles;
             std::vector<HandleInfo> elseH = handles;
             for (auto& st : x.thenBody) checkStmt(*st, scope, retTy, tb, thenH, subst);
             scope.pop();
+            auto thenSnap = scope.snapshotOwnership();
+
+            scope.restoreOwnership(preSnap);
+
             scope.push();
             for (auto& st : x.elseBody) checkStmt(*st, scope, retTy, eb, elseH, subst);
             scope.pop();
+            auto elseSnap = scope.snapshotOwnership();
+
+            for (auto& [instanceId, preState] : preSnap.byInstance) {
+                auto thenIt = thenSnap.byInstance.find(instanceId);
+                auto elseIt = elseSnap.byInstance.find(instanceId);
+                if (thenIt == thenSnap.byInstance.end() ||
+                    elseIt == elseSnap.byInstance.end())
+                    continue;
+
+                auto [thenState, thenGen] = thenIt->second;
+                auto [elseState, elseGen]  = elseIt->second;
+
+                int mergedGen = std::max(thenGen, elseGen);
+                VarInfo::OwnerState mergedState;
+                if (thenState == elseState && thenGen == elseGen) {
+                    mergedState = thenState;
+                } else if (thenState == VarInfo::OwnerState::Dropped ||
+                           elseState == VarInfo::OwnerState::Dropped) {
+                    mergedState = VarInfo::OwnerState::Dropped;
+                } else {
+                    mergedState = VarInfo::OwnerState::Readable;
+                }
+
+                if (const std::string* nm = scope.nameOf(instanceId)) {
+                    if (auto* vi = scope.lookup(*nm); vi && vi->instanceId == instanceId) {
+                        vi->ownerState = mergedState;
+                        vi->generation = mergedGen;
+                    }
+                }
+            }
+
             for ([[maybe_unused]] auto& h : handles) {
                 bool inv1 = false, inv2 = false;
                 for (auto& h2 : thenH) if (h2.varName == h.varName && h2.generation == h.generation) { inv1 = h2.invalid; break; }
@@ -841,29 +889,50 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
             }
 
-            for (auto& h : handles) {
-                if (h.varName == x.name && h.invalid) {
-                    diag_.error(e.loc,
-                        std::format("use of invalidated handle '{}'", x.name),
-                        lineFor(e.loc));
+            for (auto& h : std::ranges::reverse_view(handles)) {
+                if (h.varName == x.name) {
+                    if (h.invalid && x.name != ownerOpCtxVar_) {
+                        diag_.error(e.loc,
+                            std::format("use of invalidated handle '{}'", x.name),
+                            lineFor(e.loc));
+                    }
                     break;
                 }
             }
 
             {
-                auto ait = aliases_.find(x.name);
-                if (ait != aliases_.end()) {
-                    for (const auto& aliasName : ait->second) {
-                        auto* av = scope.lookup(aliasName);
-                        if (av && av->ownerState == VarInfo::OwnerState::Mutable) {
-                            diag_.error(e.loc,
-                                std::format(
-                                    "use of '{}' while alias '{}' holds exclusive mutable access",
-                                    x.name, aliasName),
-                                lineFor(e.loc));
-                            break;
-                        }
+                std::unordered_set<uint64_t> seen{v->instanceId};
+                std::vector<uint64_t> worklist;
+                {
+                    auto ait = aliases_.find(v->instanceId);
+                    if (ait != aliases_.end())
+                        for (auto a : ait->second) worklist.push_back(a);
+                }
+                bool reported = false;
+                while (!worklist.empty() && !reported) {
+                    uint64_t curId = worklist.back();
+                    worklist.pop_back();
+                    if (!seen.insert(curId).second) continue;
+
+                    VarInfo* av = nullptr;
+                    if (const std::string* nm = scope.nameOf(curId)) {
+                        auto* found = scope.lookup(*nm);
+                        if (found && found->instanceId == curId) av = found;
                     }
+
+                    if (av && av->ownerState == VarInfo::OwnerState::Mutable) {
+                        diag_.error(e.loc,
+                            std::format(
+                                "use of '{}' while alias '{}' holds exclusive mutable access",
+                                x.name, av->name),
+                            lineFor(e.loc));
+                        reported = true;
+                        break;
+                    }
+
+                    auto ait = aliases_.find(curId);
+                    if (ait != aliases_.end())
+                        for (auto a : ait->second) worklist.push_back(a);
                 }
             }
 
@@ -872,7 +941,12 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     std::format("use of dropped variable '{}'", x.name),
                     lineFor(e.loc));
             } else if (v->ownerState == VarInfo::OwnerState::Mutable &&
-                       v->handleOf.empty()) {
+                       v->handleOf.empty() && x.name != ownerOpCtxVar_) {
+                diag_.error(e.loc,
+                    std::format(
+                        "use of '{}' while an exclusive mutable handle is outstanding",
+                        x.name),
+                    lineFor(e.loc));
             }
 
             if (x.name != lvalCtxVar_)
@@ -1202,6 +1276,13 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     }
                 }
             } else if (it->second.isExtern && it->second.isUnsafe) {
+                for (size_t i = 0; i < x.args.size(); ++i) {
+                    if (x.args[i]->template is<IdentExpr>()) {
+                        const std::string& argName =
+                            x.args[i]->template as<IdentExpr>().name;
+                        unsafeInvalidate(argName, scope, handles, e.loc);
+                    }
+                }
             } else if (it->second.decl) {
                 for (size_t i = 0; i < x.args.size(); ++i) {
                     bool paramNomd = false;
@@ -1354,7 +1435,11 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, ReadonlyExpr>) {
+            std::string savedCtx = ownerOpCtxVar_;
+            if (x.operand->template is<IdentExpr>())
+                ownerOpCtxVar_ = x.operand->template as<IdentExpr>().name;
             auto t = checkExpr(*x.operand, scope, handles, subst);
+            ownerOpCtxVar_ = savedCtx;
             if (x.operand->template is<IdentExpr>()) {
                 ownerReadonly(x.operand->template as<IdentExpr>().name, scope, handles, e.loc);
             }
@@ -1362,7 +1447,11 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, TakeExpr>) {
+            std::string savedCtx = ownerOpCtxVar_;
+            if (x.operand->template is<IdentExpr>())
+                ownerOpCtxVar_ = x.operand->template as<IdentExpr>().name;
             auto t = checkExpr(*x.operand, scope, handles, subst);
+            ownerOpCtxVar_ = savedCtx;
             if (x.operand->template is<IdentExpr>()) {
                 const auto& idn = x.operand->template as<IdentExpr>().name;
                 ownerTake(idn, scope, handles, e.loc);
@@ -1372,7 +1461,11 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
         }
 
         if constexpr (std::is_same_v<T, ReleaseExpr>) {
+            std::string savedCtx = ownerOpCtxVar_;
+            if (x.operand->template is<IdentExpr>())
+                ownerOpCtxVar_ = x.operand->template as<IdentExpr>().name;
             auto t = checkExpr(*x.operand, scope, handles, subst);
+            ownerOpCtxVar_ = savedCtx;
             if (x.operand->template is<IdentExpr>()) {
                 ownerRelease(x.operand->template as<IdentExpr>().name, scope, handles, e.loc);
             }
@@ -1672,6 +1765,46 @@ void SemaPass::crumbleCheckUnderuse(const SourceLoc& /*funcLoc*/) {
     }
 }
 
+void SemaPass::unsafeInvalidate(const std::string& varName, Scope& scope,
+                                 std::vector<HandleInfo>& handles, const SourceLoc& loc) {
+    auto* origin = scope.lookup(varName);
+    if (!origin) return;
+
+    if (!origin->handleOf.empty()) {
+        if (auto* underlying = scope.lookup(origin->handleOf))
+            origin = underlying;
+    }
+
+    std::unordered_set<uint64_t> seen;
+    std::vector<uint64_t> worklist{origin->instanceId};
+
+    while (!worklist.empty()) {
+        uint64_t curId = worklist.back();
+        worklist.pop_back();
+        if (!seen.insert(curId).second) continue;
+
+        const std::string* nm = scope.nameOf(curId);
+        if (!nm) continue;
+        auto* v = scope.lookup(*nm);
+        if (!v || v->instanceId != curId || v->ownerState == VarInfo::OwnerState::Dropped)
+            continue;
+
+        int oldGen = v->generation;
+        ++v->generation;
+        invalidateReadersOf(*nm, oldGen, handles);
+        for (auto& h : handles) {
+            if (h.varName == *nm && h.isMutable && !h.invalid)
+                h.invalid = true;
+        }
+        v->ownerState = VarInfo::OwnerState::Readable;
+
+        auto ait = aliases_.find(curId);
+        if (ait != aliases_.end())
+            for (auto a : ait->second) worklist.push_back(a);
+    }
+    (void)loc;
+}
+
 void SemaPass::ownerReadonly(const std::string& varName, Scope& scope,
                               std::vector<HandleInfo>& handles, const SourceLoc& loc) {
     auto* v = scope.lookup(varName);
@@ -1721,16 +1854,30 @@ void SemaPass::ownerTake(const std::string& varName, Scope& scope,
     invalidateReadersOf(varName, v->generation - 1, handles);
 
     {
-        auto ait = aliases_.find(varName);
-        if (ait != aliases_.end()) {
-            for (const auto& aliasName : ait->second) {
-                auto* av = scope.lookup(aliasName);
-                if (av && av->ownerState != VarInfo::OwnerState::Dropped) {
-                    int oldGen = av->generation;
-                    ++av->generation;
-                    invalidateReadersOf(aliasName, oldGen, handles);
-                }
+        std::unordered_set<uint64_t> seen{v->instanceId};
+        std::vector<uint64_t> worklist;
+        {
+            auto ait = aliases_.find(v->instanceId);
+            if (ait != aliases_.end())
+                for (auto a : ait->second) worklist.push_back(a);
+        }
+        while (!worklist.empty()) {
+            uint64_t curId = worklist.back();
+            worklist.pop_back();
+            if (!seen.insert(curId).second) continue;
+
+            const std::string* nm = scope.nameOf(curId);
+            if (!nm) continue;
+            auto* av = scope.lookup(*nm);
+            if (av && av->instanceId == curId && av->ownerState != VarInfo::OwnerState::Dropped) {
+                int oldGen = av->generation;
+                ++av->generation;
+                invalidateReadersOf(*nm, oldGen, handles);
             }
+
+            auto ait = aliases_.find(curId);
+            if (ait != aliases_.end())
+                for (const auto& a : ait->second) worklist.push_back(a);
         }
     }
 

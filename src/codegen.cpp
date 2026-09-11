@@ -1,11 +1,79 @@
 #include "codegen.hpp"
 #include <cmath>
+#include <cstring>
+
+static bool plat32(const std::string& p) {
+    if (p == "ia32" || p == "x86" || p == "i386" || p == "i686") return true;
+    if (p.size() >= 5 && p.substr(0,4) == "armv") {
+        char v = (p.size() > 4) ? p[4] : '0';
+        if (v >= '4' && v <= '7') return true;
+    }
+    if (p == "arm32" || p == "arm" || p == "armeabi" || p == "armeabi-v7a") return true;
+    return false;
+}
+
+static bool plat64(const std::string& p) {
+    if (p == "x86" || p == "x86_64" || p == "amd64" || p == "x64") return true;
+    if (p == "arm64" || p == "aarch64" || p == "arm64v8") return true;
+    return false;
+}
+
+static int ptrBitsFromTDL(const std::string& tdl) {
+    for (auto prefix : {"p0:", "p:"}) {
+        auto pos = tdl.find(prefix);
+        if (pos == std::string::npos) continue;
+        pos += std::strlen(prefix);
+        int bits = 0;
+        while (pos < tdl.size() && std::isdigit((unsigned char)tdl[pos]))
+            bits = bits * 10 + (tdl[pos++] - '0');
+        if (bits == 32 || bits == 64) return bits;
+    }
+    return 0;
+}
+
+static bool tripleIs32(const std::string& triple) {
+    if (triple.find("i386") != std::string::npos)  return true;
+    if (triple.find("i686") != std::string::npos)  return true;
+    if (triple.find("armv4") != std::string::npos) return true;
+    if (triple.find("armv5") != std::string::npos) return true;
+    if (triple.find("armv6") != std::string::npos) return true;
+    if (triple.find("armv7") != std::string::npos) return true;
+    if (triple.find("arm-") != std::string::npos ||
+        triple.find("arm-linux") != std::string::npos) return true;
+    return false;
+}
+
+void CodeGen::initTargetInfo() {
+    for (auto& d : prog_.directives) {
+        if (d.key == "plat") {
+            platVal_ = d.value;
+            if (plat32(d.value))      { ptrBits_ = 32; return; }
+            if (plat64(d.value))      { ptrBits_ = 64; return; }
+            diag_.warning(d.loc,
+                std::format("unknown @plat value '{}'; pointer width defaults to 64 bits",
+                            d.value));
+            return;
+        }
+    }
+
+    if (!tdl_.empty()) {
+        int bits = ptrBitsFromTDL(tdl_);
+        if (bits)  { ptrBits_ = bits; return; }
+    }
+
+    if (!triple_.empty() && tripleIs32(triple_)) {
+        ptrBits_ = 32;
+    }
+}
 
 CodeGen::CodeGen(Program& prog, SemaPass& sema, DiagEngine& diag,
                  std::shared_ptr<SourceFile> sf,
                  const std::string& tdl, const std::string& triple)
     : prog_(prog), sema_(sema), diag_(diag), sf_(std::move(sf)),
-      tdl_(tdl), triple_(triple) {}
+      tdl_(tdl), triple_(triple)
+{
+    initTargetInfo();
+}
 
 std::string CodeGen::emit() {
     if (!tdl_.empty())
@@ -261,7 +329,7 @@ std::string CodeGen::tryFoldConstGlobal(const Expr& init, const ResolvedTyPtr& t
         int64_t rawVal = (it != fieldVals.end()) ? it->second : 0;
 
         if (ft && ft->isInteger()) {
-            int bw = ft->bitWidth();
+            int bw = ft->bitWidth(ptrBits_);
             if (bw < 64) {
                 uint64_t mask = (1ULL << bw) - 1;
                 rawVal = (int64_t)(rawVal & mask);
@@ -383,21 +451,22 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
             std::string owned = emitOwnedStrCopy(rawVal);
             line("  store ptr " + owned + ", ptr @" + g->name + ", align 8");
         } else if (isAggTy(ty)) {
+            const std::string szTy = is32bit() ? "i32" : "i64";
             std::string val = emitExpr(*g->init);
             line("  call void @memcpy(ptr @" + g->name + ", ptr " + val +
-                 ", i64 " + std::to_string(llvmByteSize(ty)) + ")");
+                 ", " + szTy + " " + std::to_string(llvmByteSize(ty)) + ")");
         } else {
             std::string val = emitExpr(*g->init);
             auto initTy = exprType(*g->init);
             if (ty && initTy && !initTy->equals(*ty) &&
                 !ty->isVoid() && !initTy->isVoid()) {
                 std::string tmp = "%t" + std::to_string(tmpIdx_++);
-                std::string fs  = initTy->llvmType();
-                std::string ft  = ty->llvmType();
+                std::string fs  = initTy->llvmType(ptrBits_);
+                std::string ft  = ty->llvmType(ptrBits_);
 
                 if (initTy->isInteger() && ty->isInteger()) {
-                    int sw = initTy->bitWidth();
-                    int dw = ty->bitWidth();
+                    int sw = initTy->bitWidth(ptrBits_);
+                    int dw = ty->bitWidth(ptrBits_);
                     if (dw > sw) {
                         line("  " + tmp + " = " + (initTy->isSigned() ? "sext" : "zext") +
                              " " + fs + " " + val + " to " + ft);
@@ -407,8 +476,8 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
                         val = tmp;
                     }
                 } else if (initTy->isFloat() && ty->isFloat()) {
-                    int sw = initTy->byteSize();
-                    int dw = ty->byteSize();
+                    int sw = initTy->byteSize(ptrBits_);
+                    int dw = ty->byteSize(ptrBits_);
                     if (dw > sw)
                         line("  " + tmp + " = fpext " + fs + " " + val + " to " + ft);
                     else
@@ -490,13 +559,14 @@ void CodeGen::emitGlobalFiniBody() {
 }
 
 void CodeGen::emitBuiltins() {
+    const std::string szTy = is32bit() ? "i32" : "i64";
     out_ << "; ==== Start of Rosaline Builtins ==== \n";
-    out_ << "declare i64  @strlen(ptr)\n";
-    out_ << "declare ptr  @malloc(i64)\n";
+    out_ << "declare " << szTy << "  @strlen(ptr)\n";
+    out_ << "declare ptr  @malloc(" << szTy << ")\n";
     out_ << "declare void @free(ptr)\n";
     out_ << "declare void @strcat(ptr, ptr)\n";
     out_ << "declare void @strcpy(ptr, ptr)\n";
-    out_ << "declare void @memcpy(ptr, ptr, i64)\n";
+    out_ << "declare void @memcpy(ptr, ptr, " << szTy << ")\n";
     out_ << "declare i32  @atexit(ptr)\n";
     out_ << "; ==== End of Rosaline Builtins ==== \n";
     out_ << "\n";
@@ -523,7 +593,8 @@ void CodeGen::emitBuiltins() {
                 retTy = "void";
             } else {
                 if (resolvedRet->isStruct()) {
-                    auto chunks = x86_64AbiChunks(resolvedRet);
+                    auto chunks = isX86_64() ? x86_64AbiChunks(resolvedRet)
+                                             : std::vector<AbiChunk>{};
                     if (!chunks.empty()) {
                         retTy = "{ ";
                         for (size_t ci = 0; ci < chunks.size(); ++ci) {
@@ -564,7 +635,8 @@ void CodeGen::emitBuiltins() {
                     sig += "ptr byval(" + llvmTy(pty) + ") align " + std::to_string(align);
                     first = false;
                 } else if (pty->isStruct()) {
-                    auto chunks = x86_64AbiChunks(pty);
+                    auto chunks = isX86_64() ? x86_64AbiChunks(pty)
+                                             : std::vector<AbiChunk>{};
                     if (!chunks.empty()) {
                         for (auto& chunk : chunks) {
                             if (!first) sig += ", ";
@@ -643,10 +715,13 @@ std::string CodeGen::emitOwnedStrCopy(const std::string& src) {
     line("  br label %" + endLbl);
 
     line(copyLbl + ":");
-    line("  " + len + " = call i64 @strlen(ptr " + src + ")");
-    line("  " + len1 + " = add i64 " + len + ", 1");
-    line("  " + buf + " = call ptr @malloc(i64 " + len1 + ")");
-    line("  call void @memcpy(ptr " + buf + ", ptr " + src + ", i64 " + len1 + ")");
+    {
+        const std::string szTy = is32bit() ? "i32" : "i64";
+        line("  " + len + " = call " + szTy + " @strlen(ptr " + src + ")");
+        line("  " + len1 + " = add " + szTy + " " + len + ", 1");
+        line("  " + buf + " = call ptr @malloc(" + szTy + " " + len1 + ")");
+        line("  call void @memcpy(ptr " + buf + ", ptr " + src + ", " + szTy + " " + len1 + ")");
+    }
     line("  br label %" + endLbl);
 
     line(endLbl + ":");

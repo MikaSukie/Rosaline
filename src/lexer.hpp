@@ -44,6 +44,7 @@ enum class TK {
     DirTTriple,
     DirNoMain,
     DirAsm,
+    DirPlat,
     At,
 
     Bang2,
@@ -151,6 +152,7 @@ inline std::string tkName(TK k) {
     case TK::DirTTriple:   return "@ttriple";
     case TK::DirNoMain:    return "@nomain";
     case TK::DirAsm:       return "@asm";
+    case TK::DirPlat:      return "@plat";
     case TK::At:           return "@";
     case TK::Eof:          return "<eof>";
     default:               return "?";

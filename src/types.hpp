@@ -67,7 +67,7 @@ struct ResolvedTy {
     bool isFuncPtr()const { return kind == TyKind::FuncPtr; }
     bool isNumeric()const { return isInteger() || isFloat();}
 
-    int bitWidth() const {
+    int bitWidth(int ptrBits = 64) const {
         switch (kind) {
         case TyKind::I8: case TyKind::U8: case TyKind::Char:   return 8;
         case TyKind::I16: case TyKind::U16:                    return 16;
@@ -75,27 +75,28 @@ struct ResolvedTy {
         case TyKind::I32: case TyKind::U32:                    return 32;
         case TyKind::I64: case TyKind::U64:                    return 64;
         case TyKind::IPtr: case TyKind::UPtr:
-        case TyKind::ISize: case TyKind::USize:                return 64;
+        case TyKind::ISize: case TyKind::USize:                return ptrBits;
         default: return 0;
         }
     }
 
-    int byteSize() const {
+    int byteSize(int ptrBits = 64) const {
+        int ptrBytes = ptrBits / 8;
         switch (kind) {
         case TyKind::I8: case TyKind::U8: case TyKind::Char: case TyKind::Bool: return 1;
         case TyKind::I16: case TyKind::U16: return 2;
         case TyKind::I32: case TyKind::U32: case TyKind::F32: return 4;
         case TyKind::I64: case TyKind::U64: case TyKind::F64: return 8;
         case TyKind::IPtr: case TyKind::UPtr:
-        case TyKind::ISize: case TyKind::USize:               return 8;
-        case TyKind::Ptr: case TyKind::Str: return 8;
+        case TyKind::ISize: case TyKind::USize:               return ptrBytes;
+        case TyKind::Ptr: case TyKind::Str:                   return ptrBytes;
         case TyKind::Void: return 0;
-        case TyKind::Array: return (int)(arraySize * (elemTy ? elemTy->byteSize() : 0));
-        default: return 8;
+        case TyKind::Array: return (int)(arraySize * (elemTy ? elemTy->byteSize(ptrBits) : 0));
+        default: return ptrBytes;
         }
     }
 
-    std::string llvmType() const;
+    std::string llvmType(int ptrBits = 64) const;
 
     std::string str() const;
 

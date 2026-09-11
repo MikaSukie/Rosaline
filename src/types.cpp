@@ -129,7 +129,9 @@ std::string ResolvedTy::mangle() const {
     return "unknown";
 }
 
-std::string ResolvedTy::llvmType() const {
+std::string ResolvedTy::llvmType(int ptrBits) const {
+    const std::string iPtrTy = (ptrBits == 32) ? "i32" : "i64";
+
     switch (kind) {
         case TyKind::Void:    return "void";
         case TyKind::Bool:    return "i1";
@@ -145,14 +147,14 @@ std::string ResolvedTy::llvmType() const {
         case TyKind::IPtr:
         case TyKind::UPtr:
         case TyKind::ISize:
-        case TyKind::USize:   return "i64";
+        case TyKind::USize:   return iPtrTy;
         case TyKind::F32:     return "float";
         case TyKind::F64:     return "double";
         case TyKind::Str:     return "ptr";
         case TyKind::Ptr:     return "ptr";
         case TyKind::Array:
             if (elemTy)
-                return "[" + std::to_string(arraySize) + " x " + elemTy->llvmType() + "]";
+                return "[" + std::to_string(arraySize) + " x " + elemTy->llvmType(ptrBits) + "]";
         return "[0 x i8]";
         case TyKind::Struct: {
             return "%" + name;
@@ -167,11 +169,11 @@ std::string ResolvedTy::llvmType() const {
         case TyKind::Generic:
             return "ptr";
         case TyKind::Error:
-            return "i32";
+            return iPtrTy;
         case TyKind::FuncPtr:
             return "ptr";
     }
-    return "i32";
+    return iPtrTy;
 }
 
 bool ResolvedTy::equals(const ResolvedTy& o) const {

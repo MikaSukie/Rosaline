@@ -15,6 +15,8 @@ struct VarInfo {
     int generation = 0;
     std::string handleOf;
     int         handleGen = -1;
+
+    uint64_t instanceId = 0;
 };
 
 struct HandleInfo {
@@ -34,6 +36,8 @@ public:
     }
     void declare(const std::string& name, VarInfo info) {
         assert(!frames_.empty());
+        info.instanceId = ++nextInstanceId_;
+        instanceNames_[info.instanceId] = name;
         frames_.back()[name] = std::move(info);
     }
     VarInfo* lookup(const std::string& name) {
@@ -47,9 +51,39 @@ public:
         if (frames_.empty()) return false;
         return frames_.back().count(name) > 0;
     }
+    const std::string* nameOf(uint64_t instanceId) const {
+        auto it = instanceNames_.find(instanceId);
+        return it != instanceNames_.end() ? &it->second : nullptr;
+    }
+
+    struct OwnershipSnapshot {
+        std::unordered_map<uint64_t, std::pair<VarInfo::OwnerState, int>> byInstance;
+    };
+
+    OwnershipSnapshot snapshotOwnership() const {
+        OwnershipSnapshot snap;
+        for (auto& frame : frames_)
+            for (auto& [name, vi] : frame)
+                snap.byInstance[vi.instanceId] = {vi.ownerState, vi.generation};
+        return snap;
+    }
+
+    void restoreOwnership(const OwnershipSnapshot& snap) {
+        for (auto& frame : frames_) {
+            for (auto& [name, vi] : frame) {
+                auto it = snap.byInstance.find(vi.instanceId);
+                if (it != snap.byInstance.end()) {
+                    vi.ownerState = it->second.first;
+                    vi.generation = it->second.second;
+                }
+            }
+        }
+    }
 
 private:
     std::vector<std::unordered_map<std::string, VarInfo>> frames_;
+    std::unordered_map<uint64_t, std::string> instanceNames_;
+    uint64_t nextInstanceId_ = 0;
 };
 
 struct FuncSig {
@@ -101,9 +135,10 @@ private:
 
     std::unordered_map<std::string, CrumbleState> crumbleStates_;
     std::string lvalCtxVar_;
+    std::string ownerOpCtxVar_;
     ResolvedTyPtr currentRetTy_;
 
-    std::unordered_map<std::string, std::unordered_set<std::string>> aliases_;
+    std::unordered_map<uint64_t, std::unordered_set<uint64_t>> aliases_;
     std::unordered_map<std::string, int64_t> constIntGlobals_;
     int loopDepth_ = 0;
 
@@ -127,6 +162,8 @@ private:
                              std::vector<HandleInfo>& handles,
                              const SubstMap& subst = {});
 
+    void unsafeInvalidate(const std::string& varName, Scope& scope,
+                          std::vector<HandleInfo>& handles, const SourceLoc& loc);
     void ownerReadonly(const std::string& varName, Scope& scope,
                        std::vector<HandleInfo>& handles, const SourceLoc& loc);
     void ownerTake(const std::string& varName, Scope& scope,

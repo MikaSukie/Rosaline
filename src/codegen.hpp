@@ -20,6 +20,35 @@ private:
     std::shared_ptr<SourceFile> sf_;
     std::string tdl_;
     std::string triple_;
+    std::string platVal_;
+
+    int ptrBits_ = 64;
+
+    void initTargetInfo();
+
+    bool is32bit()  const { return ptrBits_ == 32; }
+
+    bool isX86_64() const {
+        if (!platVal_.empty()) {
+            return platVal_ == "x86_64" || platVal_ == "amd64" || platVal_ == "x64";
+        }
+        if (!triple_.empty()) {
+            return triple_.find("x86_64") != std::string::npos ||
+                   triple_.find("amd64")  != std::string::npos;
+        }
+        return !is32bit();
+    }
+
+    bool isArm32() const {
+        if (!platVal_.empty()) {
+            return platVal_.size() >= 3 &&
+                   platVal_.substr(0,3) == "arm" && is32bit();
+        }
+        if (!triple_.empty()) {
+            return (triple_.find("arm") != std::string::npos) && is32bit();
+        }
+        return false;
+    }
 
     std::ostringstream  out_;
     std::ostringstream  decls_;

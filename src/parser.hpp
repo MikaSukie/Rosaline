@@ -22,6 +22,7 @@ private:
     bool  check(TK k, int offset = 0) const { return peek(offset).kind == k; }
     bool  match(TK k);
     const Token& expect(TK k, std::string_view msg = {});
+    const Token& expectSemi(std::string_view msg = {});
     std::string  lineFor(const SourceLoc& l) const;
     bool  atEnd()                     const { return cur().kind == TK::Eof; }
 

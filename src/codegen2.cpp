@@ -29,17 +29,18 @@ static std::string implicitCoerce(const std::string& val,
                                    const ResolvedTyPtr& srcTy,
                                    const ResolvedTyPtr& dstTy,
                                    std::ostringstream& out,
-                                   int& tmpIdx) {
+                                   int& tmpIdx,
+                                   int ptrBits = 64) {
     if (!srcTy || !dstTy) return val;
     if (srcTy->equals(*dstTy)) return val;
     if (srcTy->isVoid() || dstTy->isVoid()) return val;
 
     std::string tmp = "%t" + std::to_string(tmpIdx++);
-    std::string fs = srcTy->llvmType();
-    std::string ft = dstTy->llvmType();
+    std::string fs = srcTy->llvmType(ptrBits);
+    std::string ft = dstTy->llvmType(ptrBits);
 
     if (srcTy->isInteger() && dstTy->isInteger()) {
-        int sw = srcTy->bitWidth(), dw = dstTy->bitWidth();
+        int sw = srcTy->bitWidth(ptrBits), dw = dstTy->bitWidth(ptrBits);
         if (dw > sw)
             out << "  " << tmp << " = " << (srcTy->isSigned()?"sext":"zext")
                 << " " << fs << " " << val << " to " << ft << "\n";
@@ -50,7 +51,7 @@ static std::string implicitCoerce(const std::string& val,
         return tmp;
     }
     if (srcTy->isFloat() && dstTy->isFloat()) {
-        int sw = srcTy->byteSize(), dw = dstTy->byteSize();
+        int sw = srcTy->byteSize(ptrBits), dw = dstTy->byteSize(ptrBits);
         if (dw > sw)
             out << "  " << tmp << " = fpext " << fs << " " << val << " to " << ft << "\n";
         else
@@ -90,10 +91,10 @@ static std::string formatLLVMFloat(double v, bool asFloat32) {
 
 std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
     if (ty && ty->isFloat()) {
-        return formatLLVMFloat((double)v, ty->byteSize() == 4);
+        return formatLLVMFloat((double)v, ty->byteSize(ptrBits_) == 4);
     }
     if (!ty || !ty->isInteger()) return std::to_string(v);
-    int bw = ty->bitWidth();
+    int bw = ty->bitWidth(ptrBits_);
     if (bw > 0 && bw < 64) {
         uint64_t mask = (1ULL << bw) - 1;
         v = (int64_t)(v & mask);
@@ -102,13 +103,13 @@ std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
 }
 
 std::string CodeGen::llvmTy(const ResolvedTyPtr& t) const {
-    if (!t) return "i32";
+    if (!t) return (ptrBits_ == 32) ? "i32" : "i64";
     if (t->isStruct() && !t->typeArgs.empty()) {
         std::string mangledName = t->name;
         for (auto& ta : t->typeArgs) mangledName += "_" + ta->mangle();
         return "%" + mangledName;
     }
-    return t->llvmType();
+    return t->llvmType(ptrBits_);
 }
 
 std::string CodeGen::zeroVal(const ResolvedTyPtr& ty) const {
@@ -139,8 +140,9 @@ std::string CodeGen::zeroVal(const ResolvedTyPtr& ty) const {
 
 void CodeGen::emitAggrCopy(const std::string& dst, const std::string& src,
                            const ResolvedTyPtr& ty) {
+    const std::string szTy = is32bit() ? "i32" : "i64";
     line("  call void @memcpy(ptr " + dst + ", ptr " + src +
-         ", i64 " + std::to_string(llvmByteSize(ty)) + ")");
+         ", " + szTy + " " + std::to_string(llvmByteSize(ty)) + ")");
 }
 
 int CodeGen::enumPayloadPad(const std::string& name,
@@ -296,7 +298,7 @@ int CodeGen::llvmByteSize(const ResolvedTyPtr& ty) const {
         return std::max(offset, 1);
     }
 
-    return ty->byteSize();
+    return ty->byteSize(ptrBits_);
 }
 
 ResolvedTyPtr CodeGen::resolveType(const TypeNode& tn) const {
@@ -471,11 +473,11 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             ResolvedTyPtr result = lhsTy ? lhsTy : Ty::I32();
             if (lhsTy && rhsTy) {
                 if (lhsTy->isFloat() && rhsTy->isFloat() &&
-                    lhsTy->byteSize() != rhsTy->byteSize())
-                    result = (lhsTy->byteSize() >= rhsTy->byteSize()) ? lhsTy : rhsTy;
+                    lhsTy->byteSize(ptrBits_) != rhsTy->byteSize(ptrBits_))
+                    result = (lhsTy->byteSize(ptrBits_) >= rhsTy->byteSize(ptrBits_)) ? lhsTy : rhsTy;
                 else if (lhsTy->isInteger() && rhsTy->isInteger() &&
-                         lhsTy->bitWidth() != rhsTy->bitWidth())
-                    result = (lhsTy->bitWidth() >= rhsTy->bitWidth()) ? lhsTy : rhsTy;
+                         lhsTy->bitWidth(ptrBits_) != rhsTy->bitWidth(ptrBits_))
+                    result = (lhsTy->bitWidth(ptrBits_) >= rhsTy->bitWidth(ptrBits_)) ? lhsTy : rhsTy;
                 else if (lhsTy->isFloat()   && rhsTy->isInteger())
                     result = lhsTy;
                 else if (lhsTy->isInteger() && rhsTy->isFloat())
@@ -486,10 +488,10 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 !result->equals(*ctxIt->second)) {
                 auto ctxTy = ctxIt->second;
                 if (result->isInteger() && ctxTy->isInteger() &&
-                    ctxTy->bitWidth() > result->bitWidth()) {
+                    ctxTy->bitWidth(ptrBits_) > result->bitWidth(ptrBits_)) {
                     result = ctxTy;
                 } else if (result->isFloat() && ctxTy->isFloat() &&
-                           ctxTy->byteSize() > result->byteSize()) {
+                           ctxTy->byteSize(ptrBits_) > result->byteSize(ptrBits_)) {
                     result = ctxTy;
                 }
             }
@@ -729,6 +731,14 @@ void CodeGen::emitFuncSignature(std::ostringstream& os,
         if (aggRet || i) os << ", ";
         auto pty = sema_.resolveType(*fd.params[i].type, subst);
         ensureTypeEmitted(pty, subst);
+        if (is32bit() && pty && !fd.isMain &&
+            (pty->kind == TyKind::I64 || pty->kind == TyKind::U64 ||
+             pty->kind == TyKind::F64)) {
+            diag_.warning(fd.params[i].loc,
+                std::format("parameter '{}' has 64-bit type '{}' in a 32-bit target function; "
+                            "calling convention may require special handling",
+                            fd.params[i].name, pty->str()));
+        }
         bool isAgg = pty && (pty->isStruct() || pty->isEnum());
         os << (isAgg ? "ptr" : llvmTy(pty)) << " %" << fd.params[i].name;
     }
@@ -787,11 +797,12 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
             }
             int sz    = llvmByteSize(pty);
             int align = validAlign(sz, packed);
+            const std::string szTy = is32bit() ? "i32" : "i64";
             std::string localPtr = "%" + p.name + ".local";
             line("  " + localPtr + " = alloca " + llvmTy(pty) +
                  ", align " + std::to_string(align));
             line("  call void @memcpy(ptr " + localPtr + ", ptr %" + p.name +
-                 ", i64 " + std::to_string(sz) + ")");
+                 ", " + szTy + " " + std::to_string(sz) + ")");
             varAlloca_[p.name] = localPtr;
             varTypes_[p.name]  = pty;
         } else {
@@ -1060,14 +1071,14 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
             storeVar(effectiveName, val, ty);
         } else if (initTy && ty &&
             initTy->isInteger() && ty->isInteger() &&
-            ty->bitWidth() > initTy->bitWidth()) {
+            ty->bitWidth(ptrBits_) > initTy->bitWidth(ptrBits_)) {
             storeVar(effectiveName, val, ty);
         } else if (initTy && ty &&
                    initTy->isFloat() && ty->isFloat() &&
-                   ty->byteSize() > initTy->byteSize()) {
+                   ty->byteSize(ptrBits_) > initTy->byteSize(ptrBits_)) {
             storeVar(effectiveName, val, ty);
         } else {
-            val = implicitCoerce(val, initTy, ty, *fnOut_, tmpIdx_);
+            val = implicitCoerce(val, initTy, ty, *fnOut_, tmpIdx_, ptrBits_);
             storeVar(effectiveName, val, ty);
         }
     } else {
@@ -1206,17 +1217,17 @@ void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
         if (valTy && !valTy->equals(*retTy)) {
             std::string coerced = newTmp();
             if (retTy->isInteger() && valTy->isInteger()) {
-                if (retTy->bitWidth() > valTy->bitWidth())
+                if (retTy->bitWidth(ptrBits_) > valTy->bitWidth(ptrBits_))
                     line("  " + coerced + " = " +
                          (valTy->isSigned() ? "sext" : "zext") + " " +
                          llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
-                else if (retTy->bitWidth() < valTy->bitWidth())
+                else if (retTy->bitWidth(ptrBits_) < valTy->bitWidth(ptrBits_))
                     line("  " + coerced + " = trunc " +
                          llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
                 else coerced = val;
                 val = coerced;
             } else if (retTy->isFloat() && valTy->isFloat()) {
-                if (retTy->byteSize() > valTy->byteSize())
+                if (retTy->byteSize(ptrBits_) > valTy->byteSize(ptrBits_))
                     line("  " + coerced + " = fpext " +
                          llvmTy(valTy) + " " + val + " to " + llvmTy(retTy));
                 else
@@ -1240,6 +1251,14 @@ void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
 }
 
 std::string CodeGen::emitExpr(const Expr& e) {
+    {
+        auto ety = exprType(e);
+        if (ety && ety->isError()) {
+            const std::string safeTy = (ptrBits_ == 32) ? "i32" : "i64";
+            return "undef";
+        }
+    }
+
     return std::visit([&](auto& x) -> std::string {
         using T = std::decay_t<decltype(x)>;
 
@@ -1253,7 +1272,7 @@ std::string CodeGen::emitExpr(const Expr& e) {
         if constexpr (std::is_same_v<T, FloatLitExpr>) {
             auto ctxIt = currentSubst_.find("#ctx");
             bool asFloat32 = (ctxIt != currentSubst_.end() && ctxIt->second &&
-                              ctxIt->second->isFloat() && ctxIt->second->byteSize() == 4);
+                              ctxIt->second->isFloat() && ctxIt->second->byteSize(ptrBits_) == 4);
             return formatLLVMFloat((double)x.val, asFloat32);
         }
 
@@ -1385,7 +1404,7 @@ std::string CodeGen::emitExpr(const Expr& e) {
                 if (isAggTy(elemTy)) {
                     emitAggrCopy(ep, val, elemTy);
                 } else {
-                    val = implicitCoerce(val, vty, elemTy, *fnOut_, tmpIdx_);
+                    val = implicitCoerce(val, vty, elemTy, *fnOut_, tmpIdx_, ptrBits_);
                     line("  store " + llvmTy(elemTy) + " " + val +
                          ", ptr " + ep + ", align " + std::to_string(align));
                 }
@@ -1454,7 +1473,7 @@ std::string CodeGen::emitExpr(const Expr& e) {
 
                 currentSubst_ = savedSubst;
 
-                val = implicitCoerce(val, vty, fty, *fnOut_, tmpIdx_);
+                val = implicitCoerce(val, vty, fty, *fnOut_, tmpIdx_, ptrBits_);
 
                 if (isAggTy(fty)) {
                     emitAggrCopy(fp, val, fty);
@@ -1663,14 +1682,15 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
             if (!basePtr.empty()) {
                 auto idxTy  = exprType(*ix.idx);
                 std::string idxVal = emitExpr(*ix.idx);
-                if (idxTy && idxTy->isInteger() && idxTy->bitWidth() != 64) {
+                const std::string ptrIntTy = (ptrBits_ == 32) ? "i32" : "i64";
+                if (idxTy && idxTy->isInteger() && idxTy->bitWidth(ptrBits_) != ptrBits_) {
                     std::string coerced = newTmp();
                     std::string ext = idxTy->isSigned() ? "sext" : "zext";
                     line("  " + coerced + " = " + ext + " " + llvmTy(idxTy) +
-                         " " + idxVal + " to i64");
+                         " " + idxVal + " to " + ptrIntTy);
                     idxVal = coerced;
                 }
-                const std::string idxLLTy = "i64";
+                const std::string idxLLTy = ptrIntTy;
                 std::string ep = newTmp();
                 auto elemTy = (arrTy && arrTy->isArray()) ? arrTy->elemTy
                             : (arrTy && arrTy->isPtr())   ? (arrTy->inner ? arrTy->inner : Ty::I8())
@@ -1766,19 +1786,20 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
             (rty->isInteger() || rty->isPtr() || rty->isStr()) &&
             (opStr == "+" || opStr == "-")) {
             std::string idx = rval;
+            const std::string pArrIntTy = (ptrBits_ == 32) ? "i32" : "i64";
             if (rty->isPtr() || rty->isStr()) {
                 std::string asInt = newTmp();
-                line("  " + asInt + " = ptrtoint ptr " + idx + " to i64");
+                line("  " + asInt + " = ptrtoint ptr " + idx + " to " + pArrIntTy);
                 idx = asInt;
-            } else if (rty->bitWidth() != 64) {
+            } else if (rty->bitWidth(ptrBits_) != ptrBits_) {
                 std::string c = newTmp();
                 line("  " + c + " = " + (rty->isSigned() ? "sext" : "zext") +
-                     " " + llvmTy(rty) + " " + idx + " to i64");
+                     " " + llvmTy(rty) + " " + idx + " to " + pArrIntTy);
                 idx = c;
             }
             if (opStr == "-") {
                 std::string neg = newTmp();
-                line("  " + neg + " = sub i64 0, " + idx);
+                line("  " + neg + " = sub " + pArrIntTy + " 0, " + idx);
                 idx = neg;
             }
             ResolvedTyPtr elemTy = (opTy->isStr()) ? Ty::I8()
@@ -1786,16 +1807,16 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
             std::string elemLLTy = elemTy->isVoid() ? "i8" : llvmTy(elemTy);
             std::string newPtr = newTmp();
             line("  " + newPtr + " = getelementptr inbounds " + elemLLTy +
-                 ", ptr " + lval + ", i64 " + idx);
+                 ", ptr " + lval + ", " + pArrIntTy + " " + idx);
             std::string lptr = emitLValuePtr(*a.lhs, loc);
             line("  store ptr " + newPtr + ", ptr " + lptr);
             return newPtr;
         }
 
         if (opTy && rty && opTy->isInteger() && rty->isInteger() &&
-            opTy->bitWidth() != rty->bitWidth()) {
+            opTy->bitWidth(ptrBits_) != rty->bitWidth(ptrBits_)) {
             std::string coerced = newTmp();
-            if (opTy->bitWidth() > rty->bitWidth()) {
+            if (opTy->bitWidth(ptrBits_) > rty->bitWidth(ptrBits_)) {
                 std::string ext = rty->isSigned() ? "sext" : "zext";
                 line("  " + coerced + " = " + ext + " " + llvmTy(rty) + " " + rval + " to " + llvmTy(opTy));
             } else {
@@ -1805,9 +1826,9 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
         }
 
         if (opTy && rty && opTy->isFloat() && rty->isFloat() &&
-            opTy->byteSize() != rty->byteSize()) {
+            opTy->byteSize(ptrBits_) != rty->byteSize(ptrBits_)) {
             std::string coerced = newTmp();
-            if (opTy->byteSize() < rty->byteSize())
+            if (opTy->byteSize(ptrBits_) < rty->byteSize(ptrBits_))
                 line("  " + coerced + " = fptrunc " + llvmTy(rty) + " " + rval + " to " + llvmTy(opTy));
             else
                 line("  " + coerced + " = fpext " + llvmTy(rty) + " " + rval + " to " + llvmTy(opTy));
@@ -1904,7 +1925,7 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
     }
 
     if (lty && rvalTy && !lty->equals(*rvalTy))
-        rval = implicitCoerce(rval, rvalTy, lty, *fnOut_, tmpIdx_);
+        rval = implicitCoerce(rval, rvalTy, lty, *fnOut_, tmpIdx_, ptrBits_);
 
     if (a.lhs->template is<IdentExpr>()) {
         const std::string& name = a.lhs->template as<IdentExpr>().name;
@@ -1973,21 +1994,21 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     }
     if (b.lhs->template is<BinOpExpr>()) {
         if (ctxTyBin && lty_emitted && lty_emitted->isInteger() && ctxTyBin->isInteger() &&
-            ctxTyBin->bitWidth() > lty_emitted->bitWidth()) {
+            ctxTyBin->bitWidth(ptrBits_) > lty_emitted->bitWidth(ptrBits_)) {
             lty_emitted = ctxTyBin;
         }
         if (ctxTyBin && lty_emitted && lty_emitted->isFloat() && ctxTyBin->isFloat() &&
-            ctxTyBin->byteSize() > lty_emitted->byteSize()) {
+            ctxTyBin->byteSize(ptrBits_) > lty_emitted->byteSize(ptrBits_)) {
             lty_emitted = ctxTyBin;
         }
     }
 
     if (ctxTyBin && lty && lty->isInteger() && ctxTyBin->isInteger() &&
-        ctxTyBin->bitWidth() > lty->bitWidth()) {
+        ctxTyBin->bitWidth(ptrBits_) > lty->bitWidth(ptrBits_)) {
         lty = ctxTyBin;
     }
     if (ctxTyBin && lty && lty->isFloat() && ctxTyBin->isFloat() &&
-        ctxTyBin->byteSize() > lty->byteSize()) {
+        ctxTyBin->byteSize(ptrBits_) > lty->byteSize(ptrBits_)) {
         lty = ctxTyBin;
     }
 
@@ -1999,11 +2020,11 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     auto rty_emitted = rty;
     if (b.rhs->template is<BinOpExpr>()) {
         if (lty && rty_emitted && rty_emitted->isInteger() && lty->isInteger() &&
-            lty->bitWidth() > rty_emitted->bitWidth()) {
+            lty->bitWidth(ptrBits_) > rty_emitted->bitWidth(ptrBits_)) {
             rty_emitted = lty;
         }
         if (lty && rty_emitted && rty_emitted->isFloat() && lty->isFloat() &&
-            lty->byteSize() > rty_emitted->byteSize()) {
+            lty->byteSize(ptrBits_) > rty_emitted->byteSize(ptrBits_)) {
             rty_emitted = lty;
         }
     }
@@ -2060,12 +2081,13 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     }
 
     if (lty && lty->isPtr()) {
+        const std::string pBinIntTy = (ptrBits_ == 32) ? "i32" : "i64";
         auto coerceIdxI64 = [&](const std::string& val,
                                  const ResolvedTyPtr& vty) -> std::string {
-            if (!vty || !vty->isInteger() || vty->bitWidth() == 64) return val;
+            if (!vty || !vty->isInteger() || vty->bitWidth(ptrBits_) == ptrBits_) return val;
             std::string c = newTmp();
             line("  " + c + " = " + (vty->isSigned() ? "sext" : "zext") +
-                 " " + llvmTy(vty) + " " + val + " to i64");
+                 " " + llvmTy(vty) + " " + val + " to " + pBinIntTy);
             return c;
         };
         ResolvedTyPtr elemTy = lty->inner ? lty->inner : Ty::I8();
@@ -2112,12 +2134,12 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
     ResolvedTyPtr ty = lty;
     if (!ty || ty->isVoid()) ty = rty;
     if (lty && rty && lty->isInteger() && rty->isInteger() &&
-        lty->bitWidth() != rty->bitWidth()) {
-        ty = (lty->bitWidth() >= rty->bitWidth()) ? lty : rty;
+        lty->bitWidth(ptrBits_) != rty->bitWidth(ptrBits_)) {
+        ty = (lty->bitWidth(ptrBits_) >= rty->bitWidth(ptrBits_)) ? lty : rty;
     }
     if (lty && rty && lty->isFloat() && rty->isFloat() &&
-        lty->byteSize() != rty->byteSize()) {
-        ty = (lty->byteSize() >= rty->byteSize()) ? lty : rty;
+        lty->byteSize(ptrBits_) != rty->byteSize(ptrBits_)) {
+        ty = (lty->byteSize(ptrBits_) >= rty->byteSize(ptrBits_)) ? lty : rty;
     }
     if (lty && rty && lty->isFloat()   && rty->isInteger()) ty = lty;
     if (lty && rty && lty->isInteger() && rty->isFloat())   ty = rty;
@@ -2135,7 +2157,7 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
         if (srcTy == llt) return;
         std::string coerced = newTmp();
         if (vty->isInteger() && ty->isInteger()) {
-            int sw = vty->bitWidth(), dw = ty->bitWidth();
+            int sw = vty->bitWidth(ptrBits_), dw = ty->bitWidth(ptrBits_);
             if (dw > sw) {
                 std::string ext = vty->isSigned() ? "sext" : "zext";
                 line("  " + coerced + " = " + ext + " " + srcTy + " " + val + " to " + llt);
@@ -2144,7 +2166,7 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
             }
             val = coerced;
         } else if (vty->isFloat() && ty->isFloat()) {
-            if (vty->byteSize() < ty->byteSize())
+            if (vty->byteSize(ptrBits_) < ty->byteSize(ptrBits_))
                 line("  " + coerced + " = fpext " + srcTy + " " + val + " to " + llt);
             else
                 line("  " + coerced + " = fptrunc " + srcTy + " " + val + " to " + llt);
@@ -2203,16 +2225,17 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
 }
 
 std::string CodeGen::emitStringConcat(const std::string& lv, const std::string& rv) {
+    const std::string szTy = is32bit() ? "i32" : "i64";
     std::string ll = newTmp();
     std::string rl = newTmp();
-    line("  " + ll + " = call i64 @strlen(ptr " + lv + ")");
-    line("  " + rl + " = call i64 @strlen(ptr " + rv + ")");
+    line("  " + ll + " = call " + szTy + " @strlen(ptr " + lv + ")");
+    line("  " + rl + " = call " + szTy + " @strlen(ptr " + rv + ")");
     std::string tot = newTmp();
-    line("  " + tot + " = add i64 " + ll + ", " + rl);
+    line("  " + tot + " = add " + szTy + " " + ll + ", " + rl);
     std::string tot1 = newTmp();
-    line("  " + tot1 + " = add i64 " + tot + ", 1");
+    line("  " + tot1 + " = add " + szTy + " " + tot + ", 1");
     std::string buf = newTmp();
-    line("  " + buf + " = call ptr @malloc(i64 " + tot1 + ")");
+    line("  " + buf + " = call ptr @malloc(" + szTy + " " + tot1 + ")");
     line("  call void @strcpy(ptr " + buf + ", ptr " + lv + ")");
     line("  call void @strcat(ptr " + buf + ", ptr " + rv + ")");
     return buf;
@@ -2242,8 +2265,8 @@ std::string CodeGen::emitCast(const CastExpr& c) {
     bool toInt   = toTy->isInteger();
     bool fromPtr = fromTy->isPtr() || fromTy->isStr();
     bool toPtr   = toTy->isPtr()   || toTy->isStr();
-    int fromW    = fromTy->bitWidth();
-    int toW      = toTy->bitWidth();
+    int fromW    = fromTy->bitWidth(ptrBits_);
+    int toW      = toTy->bitWidth(ptrBits_);
 
     std::string tmp = newTmp();
 
@@ -2267,22 +2290,23 @@ std::string CodeGen::emitCast(const CastExpr& c) {
         else
             line("  " + tmp + " = fptrunc " + fll + " " + v + " to " + tll);
     } else {
+        const std::string ptrIntTy = (ptrBits_ == 32) ? "i32" : "i64";
         if (fromPtr && toInt) {
-            if (toW == 64) {
-                line("  " + tmp + " = ptrtoint ptr " + v + " to i64");
+            if (toW == ptrBits_) {
+                line("  " + tmp + " = ptrtoint ptr " + v + " to " + ptrIntTy);
             } else {
                 std::string wide = newTmp();
-                line("  " + wide + " = ptrtoint ptr " + v + " to i64");
-                line("  " + tmp + " = trunc i64 " + wide + " to " + tll);
+                line("  " + wide + " = ptrtoint ptr " + v + " to " + ptrIntTy);
+                line("  " + tmp + " = trunc " + ptrIntTy + " " + wide + " to " + tll);
             }
         } else if (fromInt && toPtr) {
             std::string wide = v;
-            if (fromW != 64) {
+            if (fromW != ptrBits_) {
                 wide = newTmp();
                 std::string ext = fromTy->isSigned() ? "sext" : "zext";
-                line("  " + wide + " = " + ext + " " + fll + " " + v + " to i64");
+                line("  " + wide + " = " + ext + " " + fll + " " + v + " to " + ptrIntTy);
             }
-            line("  " + tmp + " = inttoptr i64 " + wide + " to ptr");
+            line("  " + tmp + " = inttoptr " + ptrIntTy + " " + wide + " to ptr");
         } else
             tmp = v;
     }
@@ -2375,13 +2399,14 @@ std::string CodeGen::emitIndex(const IndexExpr& ix, const SourceLoc& loc) {
 
     std::string idxVal = emitExpr(*ix.idx);
 
-    if (idxTy && idxTy->isInteger() && idxTy->bitWidth() != 64) {
+    const std::string ptrIntTy = (ptrBits_ == 32) ? "i32" : "i64";
+    if (idxTy && idxTy->isInteger() && idxTy->bitWidth(ptrBits_) != ptrBits_) {
         std::string coerced = newTmp();
         std::string ext = idxTy->isSigned() ? "sext" : "zext";
-        line("  " + coerced + " = " + ext + " " + llvmTy(idxTy) + " " + idxVal + " to i64");
+        line("  " + coerced + " = " + ext + " " + llvmTy(idxTy) + " " + idxVal + " to " + ptrIntTy);
         idxVal = coerced;
     }
-    const std::string idxLLTy = "i64";
+    const std::string idxLLTy = ptrIntTy;
 
     ResolvedTyPtr elemTy;
     if (arrTy && arrTy->isArray()) elemTy = arrTy->elemTy;
@@ -2677,7 +2702,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             currentSubst_ = savedArgCtx;
 
             if (expectedTy && !expectedTy->isGeneric() && ai.ty && !ai.ty->equals(*expectedTy)) {
-                ai.val = implicitCoerce(ai.val, ai.ty, expectedTy, *fnOut_, tmpIdx_);
+                ai.val = implicitCoerce(ai.val, ai.ty, expectedTy, *fnOut_, tmpIdx_, ptrBits_);
                 ai.ty  = expectedTy;
             }
         }
@@ -2726,7 +2751,8 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
                     argStr += "ptr byval(" + llvmTy(aty) + ") align " +
                               std::to_string(align) + " " + v;
                 } else if (!argPacked) {
-                    auto chunks = x86_64AbiChunks(aty);
+                    auto chunks = isX86_64() ? x86_64AbiChunks(aty)
+                                             : std::vector<AbiChunk>{};
                     if (!chunks.empty()) {
                         bool firstChunk = true;
                         for (auto& chunk : chunks) {
@@ -2831,7 +2857,8 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             line("  call void @" + actualName + "(" + fullArgs + ")");
         } else {
             if (retTy->isStruct()) {
-                auto chunks = x86_64AbiChunks(retTy);
+                auto chunks = isX86_64() ? x86_64AbiChunks(retTy)
+                                         : std::vector<AbiChunk>{};
                 if (!chunks.empty()) {
                     std::string abiRetTy = "{ ";
                     for (size_t ci = 0; ci < chunks.size(); ++ci) {

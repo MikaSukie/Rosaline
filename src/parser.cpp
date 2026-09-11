@@ -38,6 +38,18 @@ const Token& Parser::expect(TK k, std::string_view msg) {
     return consume();
 }
 
+const Token& Parser::expectSemi(std::string_view msg) {
+    if (!check(TK::Semi)) {
+        std::string m = msg.empty()
+        ? std::format("expected ';', got '{}'", cur().text)
+        : std::string(msg);
+        diag_.error(cur().loc, m, lineFor(cur().loc));
+        static const Token dummy = {TK::Semi, ";", {"", 0, 0, 1}};
+        return dummy;
+    }
+    return consume();
+}
+
 std::unique_ptr<Program> Parser::parse() {
     auto prog = std::make_unique<Program>();
     while (!atEnd()) {
@@ -103,7 +115,7 @@ void Parser::parseTopLevel(Program& prog) {
         return;
     }
 
-    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain) {
+    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain || k == TK::DirPlat) {
         prog.directives.push_back(parseDirective());
         return;
     }
@@ -162,7 +174,7 @@ std::unique_ptr<OpaqueDecl> Parser::parseOpaqueDecl() {
     od->loc = cur().loc;
 
     od->name = expect(TK::Ident, "expected opaque type name after 'opaque'").text;
-    expect(TK::Semi, "expected ';' after opaque declaration");
+    expectSemi("expected ';' after opaque declaration");
     return od;
 }
 
@@ -216,7 +228,7 @@ std::unique_ptr<ExternDecl> Parser::parseExternDecl() {
         ed->globalType = parseType();
     }
 
-    expect(TK::Semi, "expected ';' after extern declaration");
+    expectSemi("expected ';' after extern declaration");
     return ed;
 }
 
@@ -240,7 +252,7 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(bool packed) {
         f.loc  = cur().loc;
         f.type = parseType();
         f.name = expect(TK::Ident, "expected field name").text;
-        expect(TK::Semi, "expected ';' after field declaration");
+        expectSemi("expected ';' after field declaration");
         sd->fields.push_back(std::move(f));
     }
     expect(TK::Rbrace, "expected '}' to close struct");
@@ -272,7 +284,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
             } while (match(TK::Comma));
             expect(TK::Rparen, "expected ')' after variant payload");
         }
-        expect(TK::Semi, "expected ';' after variant");
+        expectSemi("expected ';' after variant");
         ed->variants.push_back(std::move(v));
     }
     expect(TK::Rbrace, "expected '}' to close enum");
@@ -357,7 +369,7 @@ std::unique_ptr<GlobalDecl> Parser::parseGlobalDecl() {
     gd->name = expect(TK::Ident, "expected variable name").text;
     if (match(TK::Assign))
         gd->init = parseExpr();
-    expect(TK::Semi, "expected ';' after global declaration");
+    expectSemi("expected ';' after global declaration");
     return gd;
 }
 
@@ -398,7 +410,32 @@ DirectiveDecl Parser::parseDirective() {
     if (cur().kind == TK::DirNoMain) {
         d.key = "nomain";
         consume();
-        expect(TK::Semi, "expected ';' after '@nomain'");
+        expectSemi("expected ';' after '@nomain'");
+        return d;
+    }
+
+    if (cur().kind == TK::DirPlat) {
+        d.key = "plat";
+        consume();
+        expect(TK::Assign, "expected '=' after '@plat'");
+        if (check(TK::StringLit) || check(TK::Ident)) {
+            d.value = consume().text;
+            if (check(TK::Lparen)) {
+                consume();
+                std::string variant;
+                while (!check(TK::Rparen) && !check(TK::Eof) && !check(TK::Semi)) {
+                    variant += cur().text;
+                    consume();
+                }
+                expect(TK::Rparen, "expected ')' to close platform variant");
+                if (!variant.empty())
+                    d.value = d.value + variant;
+            }
+        } else {
+            diag_.error(cur().loc, "expected platform name after '@plat ='", lineFor(cur().loc));
+            d.value = "unknown";
+        }
+        expectSemi("expected ';' after '@plat' directive");
         return d;
     }
 
@@ -408,7 +445,7 @@ DirectiveDecl Parser::parseDirective() {
     if (!check(TK::StringLit))
         diag_.error(cur().loc, "expected string value for directive", lineFor(cur().loc));
     d.value = consume().text;
-    expect(TK::Semi, "expected ';' after directive");
+    expectSemi("expected ';' after directive");
     return d;
 }
 
@@ -666,7 +703,7 @@ StmtPtr Parser::parseStmt() {
         }
 
         expect(TK::Rbrace, "expected '}' to close '@asm' block");
-        expect(TK::Semi,   "expected ';' after '@asm { ... }'");
+        expectSemi("expected ';' after '@asm { ... }'");
 
         auto s = std::make_unique<Stmt>();
         s->loc = sLoc;
@@ -676,7 +713,7 @@ StmtPtr Parser::parseStmt() {
 
     if (check(TK::Break)) {
         consume();
-        expect(TK::Semi, "expected ';' after 'break'");
+        expectSemi("expected ';' after 'break'");
         auto s = std::make_unique<Stmt>();
         s->loc = sLoc; s->v = BreakStmt{};
         return s;
@@ -684,7 +721,7 @@ StmtPtr Parser::parseStmt() {
 
     if (check(TK::Continue)) {
         consume();
-        expect(TK::Semi, "expected ';' after 'continue'");
+        expectSemi("expected ';' after 'continue'");
         auto s = std::make_unique<Stmt>();
         s->loc = sLoc; s->v = ContinueStmt{};
         return s;
@@ -718,10 +755,14 @@ StmtPtr Parser::parseStmt() {
 
     auto expr = parseExpr();
     if (!check(TK::Semi)) {
-        diag_.error(cur().loc, "expected ';' after expression", lineFor(cur().loc));
-        synchronize({TK::Semi, TK::Rbrace});
+        diag_.error(cur().loc,
+            std::format("expected ';' after expression, got '{}'", cur().text),
+            lineFor(cur().loc));
+        if (!check(TK::Rbrace) && !atEnd())
+            {}
+    } else {
+        consume();
     }
-    match(TK::Semi);
     auto s = std::make_unique<Stmt>();
     s->loc = sLoc;
     s->v   = ExprStmt{std::move(expr)};
@@ -738,7 +779,7 @@ StmtPtr Parser::parseVarDecl(bool nomd) {
     vd.name = expect(TK::Ident, "expected variable name").text;
     if (match(TK::Assign))
         vd.init = parseExpr();
-    expect(TK::Semi, "expected ';' after variable declaration");
+    expectSemi("expected ';' after variable declaration");
     s->v = std::move(vd);
     return s;
 }
@@ -803,7 +844,7 @@ StmtPtr Parser::parseReturn() {
     ReturnStmt rs;
     if (!check(TK::Semi))
         rs.value = parseExpr();
-    expect(TK::Semi, "expected ';' after return");
+    expectSemi("expected ';' after return");
     s->v = std::move(rs);
     return s;
 }
