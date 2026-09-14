@@ -64,7 +64,8 @@ private:
     ExprPtr parsePrimary();
     ExprPtr parseTypeswitchExpr();
     ExprPtr parseMatchExpr();
-    ExprPtr parseCrumbleConstraints(ExprPtr operand);
+    ExprPtr parseCheckConstraints(ExprPtr operand);
+    ExprPtr parseClaimConstraints(ExprPtr operand);
     ExprPtr parseStructInit(std::string name, SourceLoc loc);
 
     std::vector<Param> parseParamList();

@@ -585,7 +585,7 @@ void SemaPass::checkFunc(FuncDecl& fd, const SubstMap& subst) {
     bool hasReturn = false;
     std::vector<HandleInfo> handles;
 
-    crumbleStates_.clear();
+    cacStates_.clear();
     aliases_.clear();
     lvalCtxVar_.clear();
     ownerOpCtxVar_.clear();
@@ -594,7 +594,7 @@ void SemaPass::checkFunc(FuncDecl& fd, const SubstMap& subst) {
         checkStmt(*s, scope, retTy, hasReturn, handles, subst);
     }
 
-    crumbleCheckUnderuse(fd.loc);
+    cacCheckLeftovers(fd.loc);
 
     if (!retTy->isVoid() && !hasReturn && !fd.genericParams.empty() == false) {
         diag_.warning(fd.loc,
@@ -950,7 +950,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             }
 
             if (x.name != lvalCtxVar_)
-                crumbleRead(x.name, e.loc);
+                cacBareRead(x.name, e.loc);
             return v->type;
         }
 
@@ -984,7 +984,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 lvalCtxVar_ = id.name;
                 checkExpr(*x.lhs, scope, handles, subst);
                 lvalCtxVar_.clear();
-                crumbleWrite(id.name, e.loc);
+                cacBareWrite(id.name, e.loc);
             } else {
                 checkExpr(*x.lhs, scope, handles, subst);
             }
@@ -1455,7 +1455,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             if (x.operand->template is<IdentExpr>()) {
                 const auto& idn = x.operand->template as<IdentExpr>().name;
                 ownerTake(idn, scope, handles, e.loc);
-                crumbleWrite(idn, e.loc);
+                cacBareWrite(idn, e.loc);
             }
             return Ty::Ptr(t);
         }
@@ -1472,27 +1472,46 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
             return t;
         }
 
-        if constexpr (std::is_same_v<T, CrumbleExpr>) {
-            auto t = checkExpr(*x.operand, scope, handles, subst);
-            if (x.operand->template is<IdentExpr>()) {
-                auto& idn = x.operand->template as<IdentExpr>().name;
-                for (auto& h : std::ranges::reverse_view(handles)) {
-                    if (h.varName == idn && h.invalid) {
-                        diag_.error(e.loc,
-                            std::format("crumble applied to invalid handle '{}'", idn),
-                            lineFor(e.loc));
-                        break;
-                    }
-                }
-                if (x.readLimit >= 0 || x.writeLimit >= 0) {
-                    CrumbleState cs;
-                    cs.readLimit  = x.readLimit;
-                    cs.writeLimit = x.writeLimit;
-                    cs.declLoc    = e.loc;
-                    crumbleStates_[idn] = cs;
+        if constexpr (std::is_same_v<T, CheckExpr>) {
+            if (!x.operand->template is<IdentExpr>()) {
+                diag_.error(e.loc, "check(...) requires a plain variable name", lineFor(e.loc));
+                return Ty::Void();
+            }
+            auto& idn = x.operand->template as<IdentExpr>().name;
+            auto* v = scope.lookup(idn);
+            if (!v) {
+                diag_.error(e.loc, std::format("unknown variable '{}'", idn), lineFor(e.loc));
+                return Ty::Void();
+            }
+            for (auto& h : std::ranges::reverse_view(handles)) {
+                if (h.varName == idn && h.invalid) {
+                    diag_.error(e.loc,
+                        std::format("check applied to invalid handle '{}'", idn),
+                        lineFor(e.loc));
+                    break;
                 }
             }
-            return t;
+            CACState cs;
+            cs.readLimit  = x.readSpecified  ? x.readLimit  : -1;
+            cs.writeLimit = x.writeSpecified ? x.writeLimit : -1;
+            cs.declLoc    = e.loc;
+            cacStates_[idn] = cs;
+            return v->type;
+        }
+
+        if constexpr (std::is_same_v<T, ClaimExpr>) {
+            if (!x.operand->template is<IdentExpr>()) {
+                diag_.error(e.loc, "claim(...) requires a plain variable name", lineFor(e.loc));
+                return Ty::Void();
+            }
+            auto& idn = x.operand->template as<IdentExpr>().name;
+            auto* v = scope.lookup(idn);
+            if (!v) {
+                diag_.error(e.loc, std::format("unknown variable '{}'", idn), lineFor(e.loc));
+                return Ty::Void();
+            }
+            cacClaim(idn, x.wantsRead, x.readCredits, x.wantsWrite, x.writeCredits, e.loc);
+            return v->type;
         }
 
         if constexpr (std::is_same_v<T, TypeswitchExpr>) {
@@ -1724,42 +1743,105 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
     }, e.v);
 }
 
-void SemaPass::crumbleRead(const std::string& name, const SourceLoc& loc) {
-    auto it = crumbleStates_.find(name);
-    if (it == crumbleStates_.end()) return;
-    ++it->second.readCount;
-    if (it->second.readLimit >= 0 && it->second.readCount > it->second.readLimit) {
+void SemaPass::cacBareRead(const std::string& name, const SourceLoc& loc) {
+    auto it = cacStates_.find(name);
+    if (it == cacStates_.end()) return;
+    auto& cs = it->second;
+    if (cs.readCredits <= 0) {
         diag_.error(loc,
-            std::format("crumble: '{}' read {} time(s) but limit is {}",
-                name, it->second.readCount, it->second.readLimit),
+            std::format("'{}' is under a check() budget; unclaimed read is not allowed "
+                        "(use claim({})!r first)", name, name),
             lineFor(loc));
+        return;
+    }
+    --cs.readCredits;
+}
+
+void SemaPass::cacBareWrite(const std::string& name, const SourceLoc& loc) {
+    auto it = cacStates_.find(name);
+    if (it == cacStates_.end()) return;
+    auto& cs = it->second;
+    if (cs.writeCredits <= 0) {
+        diag_.error(loc,
+            std::format("'{}' is under a check() budget; unclaimed write is not allowed "
+                        "(use claim({})!w first)", name, name),
+            lineFor(loc));
+        return;
+    }
+    --cs.writeCredits;
+}
+
+void SemaPass::cacClaim(const std::string& name, bool wantsRead, int readCredits,
+                         bool wantsWrite, int writeCredits, const SourceLoc& loc) {
+    auto it = cacStates_.find(name);
+    if (it == cacStates_.end()) {
+        diag_.error(loc,
+            std::format("claim({}) with no active check() budget for '{}'", name, name),
+            lineFor(loc));
+        return;
+    }
+    auto& cs = it->second;
+
+    if (wantsRead) {
+        cs.readClaimed += readCredits;
+        cs.readCredits += readCredits;
+        if (cs.readLimit >= 0 && cs.readClaimed > cs.readLimit) {
+            diag_.error(loc,
+                std::format("claim: '{}' claimed {} read(s) but check() limit is {}",
+                    name, cs.readClaimed, cs.readLimit),
+                lineFor(loc));
+        }
+    }
+    if (wantsWrite) {
+        cs.writeClaimed += writeCredits;
+        cs.writeCredits += writeCredits;
+        if (cs.writeLimit >= 0 && cs.writeClaimed > cs.writeLimit) {
+            diag_.error(loc,
+                std::format("claim: '{}' claimed {} write(s) but check() limit is {}",
+                    name, cs.writeClaimed, cs.writeLimit),
+                lineFor(loc));
+        }
     }
 }
 
-void SemaPass::crumbleWrite(const std::string& name, const SourceLoc& loc) {
-    auto it = crumbleStates_.find(name);
-    if (it == crumbleStates_.end()) return;
-    ++it->second.writeCount;
-    if (it->second.writeLimit >= 0 && it->second.writeCount > it->second.writeLimit) {
-        diag_.error(loc,
-            std::format("crumble: '{}' written {} time(s) but limit is {}",
-                name, it->second.writeCount, it->second.writeLimit),
-            lineFor(loc));
-    }
-}
-
-void SemaPass::crumbleCheckUnderuse(const SourceLoc& /*funcLoc*/) {
-    for (auto& [name, cs] : crumbleStates_) {
-        if (cs.readLimit >= 0 && cs.readCount < cs.readLimit) {
+void SemaPass::cacCheckLeftovers(const SourceLoc& /*funcLoc*/) {
+    for (auto& [name, cs] : cacStates_) {
+        if (cs.readLimit >= 0 && cs.readClaimed < cs.readLimit) {
             diag_.warning(cs.declLoc,
-                std::format("crumble: '{}' read only {} time(s), expected {}",
-                    name, cs.readCount, cs.readLimit),
+                std::format("check: '{}' claimed only {} read(s), budget was {}",
+                    name, cs.readClaimed, cs.readLimit),
                 lineFor(cs.declLoc));
         }
-        if (cs.writeLimit >= 0 && cs.writeCount < cs.writeLimit) {
+        if (cs.writeLimit >= 0 && cs.writeClaimed < cs.writeLimit) {
             diag_.warning(cs.declLoc,
-                std::format("crumble: '{}' written only {} time(s), expected {}",
-                    name, cs.writeCount, cs.writeLimit),
+                std::format("check: '{}' claimed only {} write(s), budget was {}",
+                    name, cs.writeClaimed, cs.writeLimit),
+                lineFor(cs.declLoc));
+        }
+        if (cs.readLimit < 0 && cs.readClaimed > 0) {
+            diag_.warning(cs.declLoc,
+                std::format("check: '{}' has no read limit; {} read claim(s) observed "
+                            "(consider check({})!r={})",
+                    name, cs.readClaimed, name, cs.readClaimed),
+                lineFor(cs.declLoc));
+        }
+        if (cs.writeLimit < 0 && cs.writeClaimed > 0) {
+            diag_.warning(cs.declLoc,
+                std::format("check: '{}' has no write limit; {} write claim(s) observed "
+                            "(consider check({})!w={})",
+                    name, cs.writeClaimed, name, cs.writeClaimed),
+                lineFor(cs.declLoc));
+        }
+        if (cs.readCredits > 0) {
+            diag_.warning(cs.declLoc,
+                std::format("check: '{}' has {} unused claimed read(s) remaining",
+                    name, cs.readCredits),
+                lineFor(cs.declLoc));
+        }
+        if (cs.writeCredits > 0) {
+            diag_.warning(cs.declLoc,
+                std::format("check: '{}' has {} unused claimed write(s) remaining",
+                    name, cs.writeCredits),
                 lineFor(cs.declLoc));
         }
     }

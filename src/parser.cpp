@@ -1114,12 +1114,19 @@ ExprPtr Parser::parseUnary() {
         e->loc = loc; e->v = ReleaseExpr{std::move(op)};
         return e;
     }
-    if (check(TK::Crumble)) {
+    if (check(TK::Check)) {
         consume();
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
-        return parseCrumbleConstraints(std::move(op));
+        return parseCheckConstraints(std::move(op));
+    }
+    if (check(TK::Claim)) {
+        consume();
+        expect(TK::Lparen, "expected '('");
+        auto op = parseExpr();
+        expect(TK::Rparen, "expected ')'");
+        return parseClaimConstraints(std::move(op));
     }
 
     auto base = parsePrimary();
@@ -1494,18 +1501,40 @@ ExprPtr Parser::parseMatchExpr() {
     return e;
 }
 
-ExprPtr Parser::parseCrumbleConstraints(ExprPtr operand) {
-    CrumbleExpr ce;
+ExprPtr Parser::parseCheckConstraints(ExprPtr operand) {
+    CheckExpr ce;
     ce.operand = std::move(operand);
     while (check(TK::Bang)) {
         consume();
         std::string which = expect(TK::Ident, "expected 'r' or 'w'").text;
         expect(TK::Assign, "expected '='");
         int64_t val = expect(TK::IntLit, "expected integer").ival;
-        if (which == "r") ce.readLimit  = (int)val;
-        else if (which == "w") ce.writeLimit = (int)val;
-        else diag_.error(cur().loc, "crumble constraint must be 'r' or 'w'");
+        if (which == "r") { ce.readLimit  = (int)val; ce.readSpecified  = true; }
+        else if (which == "w") { ce.writeLimit = (int)val; ce.writeSpecified = true; }
+        else diag_.error(cur().loc, "check constraint must be 'r' or 'w'");
     }
+    auto e = std::make_unique<Expr>();
+    e->v = std::move(ce);
+    return e;
+}
+
+ExprPtr Parser::parseClaimConstraints(ExprPtr operand) {
+    ClaimExpr ce;
+    ce.operand = std::move(operand);
+    while (check(TK::Bang)) {
+        consume();
+        std::string which = expect(TK::Ident, "expected 'r' or 'w'").text;
+        int count = 1;
+        if (check(TK::Assign)) {
+            consume();
+            count = (int)expect(TK::IntLit, "expected integer").ival;
+        }
+        if (which == "r") { ce.wantsRead = true; ce.readCredits += count; }
+        else if (which == "w") { ce.wantsWrite = true; ce.writeCredits += count; }
+        else diag_.error(cur().loc, "claim constraint must be 'r' or 'w'");
+    }
+    if (!ce.wantsRead && !ce.wantsWrite)
+        diag_.error(cur().loc, "claim requires at least one of '!r' or '!w'");
     auto e = std::make_unique<Expr>();
     e->v = std::move(ce);
     return e;

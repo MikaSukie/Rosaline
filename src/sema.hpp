@@ -100,11 +100,13 @@ struct FuncSig {
     const ExternDecl*          externDecl  = nullptr;
 };
 
-struct CrumbleState {
-    int readLimit  = -1;
-    int writeLimit = -1;
-    int readCount  = 0;
-    int writeCount = 0;
+struct CACState {
+    int readLimit   = -1;
+    int writeLimit  = -1;
+    int readClaimed  = 0;
+    int writeClaimed = 0;
+    int readCredits  = 0;
+    int writeCredits = 0;
     SourceLoc declLoc;
 };
 
@@ -133,7 +135,7 @@ private:
 
     std::unique_ptr<TypeResolver> tyResolver_;
 
-    std::unordered_map<std::string, CrumbleState> crumbleStates_;
+    std::unordered_map<std::string, CACState> cacStates_;
     std::string lvalCtxVar_;
     std::string ownerOpCtxVar_;
     ResolvedTyPtr currentRetTy_;
@@ -174,9 +176,11 @@ private:
     void invalidateReadersOf(const std::string& varName, int generation,
                               std::vector<HandleInfo>& handles);
 
-    void crumbleRead(const std::string& varName, const SourceLoc& loc);
-    void crumbleWrite(const std::string& varName, const SourceLoc& loc);
-    void crumbleCheckUnderuse(const SourceLoc& funcLoc);
+    void cacBareRead(const std::string& varName, const SourceLoc& loc);
+    void cacBareWrite(const std::string& varName, const SourceLoc& loc);
+    void cacClaim(const std::string& varName, bool wantsRead, int readCredits,
+                  bool wantsWrite, int writeCredits, const SourceLoc& loc);
+    void cacCheckLeftovers(const SourceLoc& funcLoc);
 
     std::string lineFor(const SourceLoc& l) const {
         if (sf_) return sf_->getLine(l.line);

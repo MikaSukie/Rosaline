@@ -152,10 +152,20 @@ struct DerefExpr     { ExprPtr operand; };
 struct ReadonlyExpr  { ExprPtr operand; };
 struct TakeExpr      { ExprPtr operand; };
 struct ReleaseExpr   { ExprPtr operand; };
-struct CrumbleExpr   {
+struct CheckExpr     {
     ExprPtr     operand;
     int         readLimit  = -1;
     int         writeLimit = -1;
+    bool        readSpecified  = false;
+    bool        writeSpecified = false;
+};
+
+struct ClaimExpr     {
+    ExprPtr     operand;
+    int         readCredits  = 0;
+    int         writeCredits = 0;
+    bool        wantsRead    = false;
+    bool        wantsWrite   = false;
 };
 
 struct TypecaseArm {
@@ -204,7 +214,7 @@ struct Expr {
         IdentExpr, BinOpExpr, UnaryOpExpr, CastExpr,
         CallExpr, FieldAccessExpr, EnumAccessExpr, IndexExpr,
         AddressOfExpr, DerefExpr,
-        ReadonlyExpr, TakeExpr, ReleaseExpr, CrumbleExpr,
+        ReadonlyExpr, TakeExpr, ReleaseExpr, CheckExpr, ClaimExpr,
         TypeswitchExpr, MatchExpr, AssignExpr,
         TernaryExpr, StructInitExpr, ArrayLitExpr
     > v;

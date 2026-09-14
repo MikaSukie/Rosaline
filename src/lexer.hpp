@@ -18,7 +18,7 @@ enum class TK {
     Typeswitch, Typecase, Fallback,
     In,
     Nomd,
-    Readonly, Take, Release, Crumble,
+    Readonly, Take, Release, Check, Claim,
     For,
     Fn,
 
@@ -102,7 +102,8 @@ inline std::string tkName(TK k) {
     case TK::Readonly:     return "readonly";
     case TK::Take:         return "take";
     case TK::Release:      return "release";
-    case TK::Crumble:      return "crumble";
+    case TK::Check:        return "check";
+    case TK::Claim:        return "claim";
     case TK::For:          return "for";
     case TK::Fn:           return "fn";
     case TK::Ident:        return "identifier";

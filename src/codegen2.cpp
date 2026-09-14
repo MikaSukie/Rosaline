@@ -1632,7 +1632,8 @@ std::string CodeGen::emitExpr(const Expr& e) {
         if constexpr (std::is_same_v<T, TakeExpr>)      return emitTake(x);
         if constexpr (std::is_same_v<T, ReleaseExpr>)   return emitRelease(x);
 
-        if constexpr (std::is_same_v<T, CrumbleExpr>)   return emitExpr(*x.operand);
+        if constexpr (std::is_same_v<T, CheckExpr>)     return emitExpr(*x.operand);
+        if constexpr (std::is_same_v<T, ClaimExpr>)     return emitExpr(*x.operand);
 
         if constexpr (std::is_same_v<T, MatchExpr>)     return emitMatch(x, e.loc);
 
