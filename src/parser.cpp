@@ -597,7 +597,10 @@ TypeNodePtr Parser::parseBaseType() {
                 }
             }
             expect(TK::Rparen, "expected ')' after function type parameters");
-            if (isTypeStart()) {
+            bool retFollowedByName = check(TK::Ident) &&
+                (check(TK::Comma, 1) || check(TK::Rparen, 1) || check(TK::Semi, 1) ||
+                 check(TK::Assign, 1) || check(TK::Lbrace, 1));
+            if (isTypeStart() && !retFollowedByName) {
                 ft.retType = parseType();
             } else {
                 auto vt = std::make_unique<TypeNode>();
