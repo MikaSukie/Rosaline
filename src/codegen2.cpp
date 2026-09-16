@@ -502,7 +502,7 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
         }
         if constexpr (std::is_same_v<T, FieldAccessExpr>) {
             auto ot = exprType(*x.obj);
-            if (ot && ot->isPtr() && ot->inner) ot = ot->inner;
+            while (ot && ot->isPtr() && ot->inner) ot = ot->inner;
             if (ot && ot->isStruct()) {
                 auto& structs = sema_.structs();
                 auto it = structs.find(ot->name);
@@ -1716,33 +1716,43 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
     if (e.template is<FieldAccessExpr>()) {
         auto& fa = e.template as<FieldAccessExpr>();
         auto oty = exprType(*fa.obj);
-        bool autoDeref = oty && oty->isPtr() && oty->inner && oty->inner->isStruct();
-        if (autoDeref) oty = oty->inner;
+        int derefLevels = 0;
+        while (oty && oty->isPtr() && oty->inner) {
+            oty = oty->inner;
+            ++derefLevels;
+        }
+        bool autoDeref = derefLevels > 0;
         if (oty && oty->isStruct()) {
             std::string basePtr;
             if (fa.obj->template is<IdentExpr>()) {
                 const std::string& objName = fa.obj->template as<IdentExpr>().name;
                 auto ait = varAlloca_.find(objName);
-                if (ait != varAlloca_.end()) {
+                std::string startPtr;
+                if (ait != varAlloca_.end()) startPtr = ait->second;
+                else if (isGlobalSymbol(objName)) startPtr = "@" + objName;
+
+                if (!startPtr.empty()) {
                     if (autoDeref) {
-                        std::string loaded = newTmp();
-                        line("  " + loaded + " = load ptr, ptr " + ait->second);
-                        basePtr = loaded;
+                        std::string cur = startPtr;
+                        for (int i = 0; i < derefLevels; ++i) {
+                            std::string loaded = newTmp();
+                            line("  " + loaded + " = load ptr, ptr " + cur);
+                            cur = loaded;
+                        }
+                        basePtr = cur;
                     } else {
-                        basePtr = ait->second;
-                    }
-                } else if (isGlobalSymbol(objName)) {
-                    if (autoDeref) {
-                        std::string loaded = newTmp();
-                        line("  " + loaded + " = load ptr, ptr @" + objName);
-                        basePtr = loaded;
-                    } else {
-                        basePtr = "@" + objName;
+                        basePtr = startPtr;
                     }
                 }
             }
-            if (basePtr.empty())
+            if (basePtr.empty()) {
                 basePtr = emitExpr(*fa.obj);
+                for (int i = 0; i < derefLevels - 1; ++i) {
+                    std::string loaded = newTmp();
+                    line("  " + loaded + " = load ptr, ptr " + basePtr);
+                    basePtr = loaded;
+                }
+            }
 
             if (!basePtr.empty() && basePtr != "undef") {
                 auto sit = sema_.structs().find(oty->name);
@@ -2317,8 +2327,12 @@ std::string CodeGen::emitCast(const CastExpr& c) {
 std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc& loc) {
     auto oty = exprType(*fa.obj);
 
-    bool autoDeref = oty && oty->isPtr() && oty->inner && oty->inner->isStruct();
-    if (autoDeref) oty = oty->inner;
+    int derefLevels = 0;
+    while (oty && oty->isPtr() && oty->inner) {
+        oty = oty->inner;
+        ++derefLevels;
+    }
+    bool autoDeref = derefLevels > 0;
 
     if (oty && oty->isStruct()) {
         auto sit = sema_.structs().find(oty->name);
@@ -2346,9 +2360,13 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
 
         auto resolveBase = [&](const std::string& allocaPtr) -> std::string {
             if (!autoDeref) return allocaPtr;
-            std::string loaded = newTmp();
-            line("  " + loaded + " = load ptr, ptr " + allocaPtr);
-            return loaded;
+            std::string cur = allocaPtr;
+            for (int i = 0; i < derefLevels; ++i) {
+                std::string loaded = newTmp();
+                line("  " + loaded + " = load ptr, ptr " + cur);
+                cur = loaded;
+            }
+            return cur;
         };
 
         if (fa.obj->template is<IdentExpr>()) {
@@ -2378,6 +2396,11 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
 
         std::string objVal = emitExpr(*fa.obj);
         std::string basePtr = objVal;
+        for (int i = 0; i < derefLevels - 1; ++i) {
+            std::string loaded = newTmp();
+            line("  " + loaded + " = load ptr, ptr " + basePtr);
+            basePtr = loaded;
+        }
 
         std::string fp = newTmp();
         line("  " + fp + " = getelementptr inbounds %" + llvmStructName +

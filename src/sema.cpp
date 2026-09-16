@@ -1318,7 +1318,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
 
         if constexpr (std::is_same_v<T, FieldAccessExpr>) {
             auto objTy = checkExpr(*x.obj, scope, handles, subst);
-            if (objTy && objTy->isPtr() && objTy->inner)
+            while (objTy && objTy->isPtr() && objTy->inner)
                 objTy = objTy->inner;
             if (objTy && objTy->isOpaque()) {
                 diag_.error(e.loc,
