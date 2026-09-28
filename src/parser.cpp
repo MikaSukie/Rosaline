@@ -115,7 +115,7 @@ void Parser::parseTopLevel(Program& prog) {
         return;
     }
 
-    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain || k == TK::DirPlat || k == TK::DirRaw) {
+    if (k == TK::DirTDL || k == TK::DirTTriple || k == TK::DirNoMain || k == TK::DirPlat || k == TK::DirRaw || k == TK::DirRt) {
         prog.directives.push_back(parseDirective());
         return;
     }
@@ -418,6 +418,20 @@ DirectiveDecl Parser::parseDirective() {
         d.key = "raw";
         consume();
         expectSemi("expected ';' after '@raw'");
+        return d;
+    }
+
+    if (cur().kind == TK::DirRt) {
+        d.key = "rt:" + cur().text.substr(1);
+        consume();
+        expect(TK::Assign, "expected '=' after runtime hook directive");
+        if (check(TK::Ident) || check(TK::StringLit)) {
+            d.value = consume().text;
+        } else {
+            diag_.error(cur().loc, "expected function name after runtime hook directive",
+                        lineFor(cur().loc));
+        }
+        expectSemi("expected ';' after runtime hook directive");
         return d;
     }
 

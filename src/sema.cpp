@@ -415,7 +415,12 @@ void SemaPass::checkGlobals() {
         auto declTy = resolveType(*g->type);
         if (!declTy || declTy->isError()) continue;
 
-        if (g->nomd && !isConstantFoldable(*g->init) && !g->init->is<StringLitExpr>()) {
+        auto isStaticStrLit = [](const Expr& e) {
+            const Expr* p = &e;
+            while (p && p->is<CastExpr>()) p = p->as<CastExpr>().operand.get();
+            return p && p->is<StringLitExpr>();
+        };
+        if (g->nomd && !isConstantFoldable(*g->init) && !isStaticStrLit(*g->init)) {
             diag_.warning(g->loc,
                 std::format("'nomd' global '{}' has a non-constant initialiser; "
                             "it will be treated as a mutable global at runtime",
@@ -1089,6 +1094,27 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                         for (auto& p : sig.decl->params)
                             if (p.type) paramTys.push_back(resolveType(*p.type, subst));
                     return Ty::FuncPtr(std::move(paramTys), sig.retType);
+                }
+            }
+            if (x.operand->template is<IdentExpr>()) {
+                auto& gname = x.operand->template as<IdentExpr>().name;
+                auto* v = scope.lookup(gname);
+                if (v && v->isGlobal && v->nomd) {
+                    if (auto* g = prog_.findGlobal(gname)) {
+                        const Expr* ie = g->init.get();
+                        while (ie && ie->is<CastExpr>())
+                            ie = ie->as<CastExpr>().operand.get();
+                        if (ie && ie->is<StringLitExpr>() && v->type &&
+                            (v->type->isStr() || v->type->isPtr())) {
+                            diag_.error(e.loc,
+                                std::format("cannot take the address of 'nomd' string '{}': "
+                                            "the name is the character data itself, so there is "
+                                            "no pointer slot to point at; use '{}' directly",
+                                            gname, gname),
+                                lineFor(e.loc));
+                            return Ty::Ptr(v->type);
+                        }
+                    }
                 }
             }
             auto t = checkExpr(*x.operand, scope, handles, subst);

@@ -46,6 +46,7 @@ enum class TK {
     DirAsm,
     DirPlat,
     DirRaw,
+    DirRt,
     At,
 
     Bang2,
@@ -155,6 +156,7 @@ inline std::string tkName(TK k) {
     case TK::DirNoMain:    return "@nomain";
     case TK::DirAsm:       return "@asm";
     case TK::DirPlat:      return "@plat";
+    case TK::DirRt:        return "@rt";
     case TK::At:           return "@";
     case TK::Eof:          return "<eof>";
     default:               return "?";

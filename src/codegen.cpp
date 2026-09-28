@@ -75,6 +75,8 @@ CodeGen::CodeGen(Program& prog, SemaPass& sema, DiagEngine& diag,
     initTargetInfo();
 }
 
+static const char* rtLibcName(const std::string& kind);
+
 std::string CodeGen::emit() {
     if (!tdl_.empty())
         out_ << "target datalayout = \"" << tdl_ << "\"\n";
@@ -83,6 +85,25 @@ std::string CodeGen::emit() {
     if (!tdl_.empty() || !triple_.empty())
         out_ << "\n";
 
+    raw_ = false;
+    rtHooks_.clear();
+    for (auto& d : prog_.directives) {
+        if (d.key == "raw") raw_ = true;
+        else if (d.key.rfind("rt:", 0) == 0 && !d.value.empty())
+            rtHooks_[d.key.substr(3)] = d.value;
+    }
+
+    staticStrGlobals_.clear();
+    for (auto& g : prog_.globals) {
+        std::string lit;
+        if (g && staticStrGlobal(*g, lit)) staticStrGlobals_.insert(g->name);
+    }
+    unmangledGlobals_.clear();
+    if (raw_) {
+        for (auto& g : prog_.globals)
+            if (g && g->nomd) unmangledGlobals_.insert(g->name);
+    }
+
     buildInsertionMap();
     emitTypeDecls();
 
@@ -90,8 +111,22 @@ std::string CodeGen::emit() {
     emitGlobals(runtimeInits);
     emitBuiltins();
 
-    if (!runtimeInits.empty())
+    if (!runtimeInits.empty()) {
         emitGlobalInitBody(runtimeInits);
+
+        bool hasMain = false;
+        for (auto& fd : prog_.funcs) if (fd->isMain) { hasMain = true; break; }
+        if (!hasMain) {
+            for (auto* g : runtimeInits) {
+                diag_.warning(g->loc,
+                    std::format("global '{}' needs runtime initialisation, but this program has no "
+                                "'main' to run it; it will stay zero/null unless your entry point "
+                                "calls '__rosaline_global_init'. Use 'nomd' with a literal for "
+                                "static data instead.", g->name),
+                    lineFor(g->loc));
+            }
+        }
+    }
 
     emitGlobalFiniBody();
 
@@ -108,6 +143,37 @@ std::string CodeGen::emit() {
     }
 
     processMonoQueue();
+
+    if (permissive_ && raw_) {
+        const std::string szTy = is32bit() ? "i32" : "i64";
+        bool wrote = false;
+        for (const char* kind : {"strlen","alloc","free","strcat","strcpy","memcpy"}) {
+            if (!rtUsedUnhooked_.count(kind)) continue;
+            std::string name = rtLibcName(kind);
+            if (rtDeclared_.count(name) || prog_.findExtern(name) || prog_.findFunc(name)) continue;
+            rtDeclared_.insert(name);
+            if (!wrote) { out_ << "\n; ==== --no-sema: unhooked runtime primitives ====\n"; wrote = true; }
+            std::string k = kind;
+            if      (k == "strlen") out_ << "declare " << szTy << " @" << name << "(ptr)\n";
+            else if (k == "alloc")  out_ << "declare ptr @" << name << "(" << szTy << ")\n";
+            else if (k == "free")   out_ << "declare void @" << name << "(ptr)\n";
+            else if (k == "memcpy") out_ << "declare void @" << name << "(ptr, ptr, " << szTy << ")\n";
+            else                    out_ << "declare void @" << name << "(ptr, ptr)\n";
+        }
+    }
+
+    if (permissive_) {
+        bool wrote = false;
+        for (auto& d : permissiveDeclLines_) {
+            if (!wrote) { out_ << "\n; ==== --no-sema implicit externs ====\n"; wrote = true; }
+            out_ << d << "\n";
+        }
+        for (auto& [name, ty] : implicitGlobals_) {
+            if (isGlobalSymbol(name)) continue;
+            if (!wrote) { out_ << "\n; ==== --no-sema implicit externs ====\n"; wrote = true; }
+            out_ << "@" << name << " = external global " << llvmTy(ty) << "\n";
+        }
+    }
 
     std::string result = out_.str();
     while (result.size() >= 2 &&
@@ -341,6 +407,102 @@ std::string CodeGen::tryFoldConstGlobal(const Expr& init, const ResolvedTyPtr& t
     return result;
 }
 
+static const char* rtLibcName(const std::string& kind) {
+    if (kind == "alloc")  return "malloc";
+    if (kind == "free")   return "free";
+    if (kind == "memcpy") return "memcpy";
+    if (kind == "strlen") return "strlen";
+    if (kind == "strcpy") return "strcpy";
+    if (kind == "strcat") return "strcat";
+    return nullptr;
+}
+
+bool CodeGen::rtAvailable(const std::string& kind) const {
+    if (rtHooks_.count(kind)) return true;
+    return !raw_;
+}
+
+std::string CodeGen::rtSym(const std::string& kind, const SourceLoc* loc) {
+    auto hit = rtHooks_.find(kind);
+    if (hit != rtHooks_.end()) return hit->second;
+
+    const char* libc = rtLibcName(kind);
+    std::string name = libc ? libc : kind;
+
+    if (raw_ && permissive_ && !false) {
+        rtUsedUnhooked_.insert(kind);
+    }
+    if (raw_ && !permissive_ && !rtReported_.count(kind)) {
+        rtReported_.insert(kind);
+        SourceLoc l;
+        if (loc) l = *loc;
+        else { l.file = sf_ ? sf_->path : "<codegen>"; l.line = 1; l.col = 1; l.len = 1; }
+        diag_.error(l,
+            std::format("this program needs the runtime primitive '{}' but '@raw' is set "
+                        "and no replacement was provided; add '@{}=<your_function>;' to the "
+                        "directives (or remove '@raw' to use libc's '{}'). "
+                        "Tip: 'nomd' globals and pointer-typed locals never need it.",
+                        kind, kind, name));
+    }
+    return name;
+}
+
+void CodeGen::emitRtDeclares() {
+    const std::string szTy = is32bit() ? "i32" : "i64";
+    struct Item { const char* kind; const char* sig; };
+    const Item items[] = {
+        {"strlen", nullptr}, {"alloc", nullptr}, {"free", nullptr},
+        {"strcat", nullptr}, {"strcpy", nullptr}, {"memcpy", nullptr},
+    };
+    auto sigFor = [&](const std::string& k, const std::string& name) -> std::string {
+        if (k == "strlen") return "declare " + szTy + "  @" + name + "(ptr)";
+        if (k == "alloc")  return "declare ptr  @" + name + "(" + szTy + ")";
+        if (k == "free")   return "declare void @" + name + "(ptr)";
+        if (k == "strcat") return "declare void @" + name + "(ptr, ptr)";
+        if (k == "strcpy") return "declare void @" + name + "(ptr, ptr)";
+        return "declare void @" + name + "(ptr, ptr, " + szTy + ")";
+    };
+    bool any = false;
+    for (auto& it : items) {
+        std::string kind = it.kind;
+        std::string name;
+        auto hit = rtHooks_.find(kind);
+        if (hit != rtHooks_.end()) {
+            name = hit->second;
+            if (prog_.findFunc(name) || prog_.findExtern(name)) continue;
+        } else if (!raw_) {
+            name = rtLibcName(kind);
+            if (prog_.findExtern(name)) continue;
+        } else {
+            continue;
+        }
+        if (rtDeclared_.count(name)) continue;
+        rtDeclared_.insert(name);
+        if (!any) { out_ << "; ==== Start of Rosaline Builtins ==== \n"; any = true; }
+        out_ << sigFor(kind, name) << "\n";
+    }
+    if (!raw_ && !rtDeclared_.count("atexit") && !prog_.findExtern("atexit")) {
+        rtDeclared_.insert("atexit");
+        if (!any) { out_ << "; ==== Start of Rosaline Builtins ==== \n"; any = true; }
+        out_ << "declare i32  @atexit(ptr)\n";
+    }
+    if (any) {
+        out_ << "; ==== End of Rosaline Builtins ==== \n\n";
+    }
+}
+
+bool CodeGen::staticStrGlobal(const GlobalDecl& g, std::string& literal) const {
+    if (!g.nomd || !g.init) return false;
+    const Expr* e = g.init.get();
+    while (e && e->is<CastExpr>())
+        e = e->as<CastExpr>().operand.get();
+    if (!e || !e->is<StringLitExpr>()) return false;
+    auto ty = sema_.resolveType(*g.type);
+    if (!ty || !(ty->isStr() || ty->isPtr())) return false;
+    literal = e->as<StringLitExpr>().val;
+    return true;
+}
+
 void CodeGen::emitGlobals(std::vector<GlobalDecl*>& runtimeInits) {
     runtimeInits.clear();
 
@@ -354,6 +516,16 @@ void CodeGen::emitGlobals(std::vector<GlobalDecl*>& runtimeInits) {
     for (auto& g : prog_.globals) {
         auto ty = sema_.resolveType(*g->type);
         ensureTypeEmitted(ty, {});
+
+        {
+            std::string lit;
+            if (staticStrGlobal(*g, lit)) {
+                out_ << gsym(g->name) << " = constant [" << (lit.size() + 1)
+                     << " x i8] c\"" << escapeIRString(lit) << "\\00\"\n";
+                continue;
+            }
+        }
+
         std::string llty = llvmTy(ty);
         std::string init = zeroVal(ty);
         bool needsRuntimeInit = false;
@@ -395,7 +567,7 @@ void CodeGen::emitGlobals(std::vector<GlobalDecl*>& runtimeInits) {
         }
 
         std::string linkage = (g->nomd && !needsRuntimeInit) ? "constant" : "global";
-        out_ << "@" << g->name << " = " << linkage << " "
+        out_ << gsym(g->name) << " = " << linkage << " "
              << llty << " " << init << "\n";
 
         if (needsRuntimeInit)
@@ -449,11 +621,11 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
                 rawVal = emitExpr(*g->init);
             }
             std::string owned = emitOwnedStrCopy(rawVal);
-            line("  store ptr " + owned + ", ptr @" + g->name + ", align 8");
+            line("  store ptr " + owned + ", ptr " + gsym(g->name) + ", align 8");
         } else if (isAggTy(ty)) {
             const std::string szTy = is32bit() ? "i32" : "i64";
             std::string val = emitExpr(*g->init);
-            line("  call void @memcpy(ptr @" + g->name + ", ptr " + val +
+            line("  call void @" + rtSym("memcpy") + "(ptr " + gsym(g->name) + ", ptr " + val +
                  ", " + szTy + " " + std::to_string(llvmByteSize(ty)) + ")");
         } else {
             std::string val = emitExpr(*g->init);
@@ -497,7 +669,7 @@ void CodeGen::emitGlobalInitBody(const std::vector<GlobalDecl*>& runtimeInits) {
             if (gAlign <= 0) gAlign = 1;
             if (gAlign > 8) gAlign = 8;
             { int a = 1; while (a < gAlign) a <<= 1; gAlign = a; }
-        line("  store " + llvmTy(ty) + " " + val + ", ptr @" + g->name +
+        line("  store " + llvmTy(ty) + " " + val + ", ptr " + gsym(g->name) +
              ", align " + std::to_string(gAlign));
         }
 
@@ -535,13 +707,13 @@ void CodeGen::emitGlobalFiniBody() {
     for (int i = (int)globalDrops_.size() - 1; i >= 0; --i) {
         auto& de = globalDrops_[i];
         if (de.kind == DropKind::OwnedStr) {
-            varAlloca_[de.varName] = "@" + de.varName;
+            varAlloca_[de.varName] = gsym(de.varName);
             varTypes_[de.varName]  = de.ty;
             emitDropEntry(de);
             varAlloca_.erase(de.varName);
             varTypes_.erase(de.varName);
         } else if (de.kind == DropKind::EnumWithStrPayload) {
-            varAlloca_[de.varName] = "@" + de.varName;
+            varAlloca_[de.varName] = gsym(de.varName);
             varTypes_[de.varName]  = de.ty;
             emitEnumPayloadDrop(de.varName, de.ty);
             varAlloca_.erase(de.varName);
@@ -567,19 +739,7 @@ void CodeGen::emitBuiltins() {
     for (auto& d : prog_.directives)
         if (d.key == "raw") { isRaw = true; break; }
 
-    if (!isRaw) {
-        const std::string szTy = is32bit() ? "i32" : "i64";
-        out_ << "; ==== Start of Rosaline Builtins ==== \n";
-        out_ << "declare " << szTy << "  @strlen(ptr)\n";
-        out_ << "declare ptr  @malloc(" << szTy << ")\n";
-        out_ << "declare void @free(ptr)\n";
-        out_ << "declare void @strcat(ptr, ptr)\n";
-        out_ << "declare void @strcpy(ptr, ptr)\n";
-        out_ << "declare void @memcpy(ptr, ptr, " << szTy << ")\n";
-        out_ << "declare i32  @atexit(ptr)\n";
-        out_ << "; ==== End of Rosaline Builtins ==== \n";
-        out_ << "\n";
-    }
+    emitRtDeclares();
 
     for (auto& ed : prog_.externs) {
         if (ed->isGlobal) continue;
@@ -686,12 +846,12 @@ std::string CodeGen::internString(const std::string& s) {
     return sym;
 }
 
-void CodeGen::emitStringConst(const std::string& val, const std::string& symName) {
+std::string CodeGen::escapeIRString(const std::string& val) {
     std::string escaped;
     for (unsigned char c : val) {
         if (c == '"')       escaped += "\\22";
         else if (c == '\\') escaped += "\\5C";
-        else if (c < 0x20 || c == 0x7F) {
+        else if (c < 0x20 || c >= 0x7F) {
             char buf[8];
             snprintf(buf, sizeof(buf), "\\%02X", c);
             escaped += buf;
@@ -699,6 +859,11 @@ void CodeGen::emitStringConst(const std::string& val, const std::string& symName
             escaped += (char)c;
         }
     }
+    return escaped;
+}
+
+void CodeGen::emitStringConst(const std::string& val, const std::string& symName) {
+    std::string escaped = escapeIRString(val);
     int len = (int)val.size() + 1;
     out_ << "@" << symName << " = private unnamed_addr constant ["
          << len << " x i8] c\"" << escaped << "\\00\"\n";
@@ -725,10 +890,10 @@ std::string CodeGen::emitOwnedStrCopy(const std::string& src) {
     line(copyLbl + ":");
     {
         const std::string szTy = is32bit() ? "i32" : "i64";
-        line("  " + len + " = call " + szTy + " @strlen(ptr " + src + ")");
+        line("  " + len + " = call " + szTy + " @" + rtSym("strlen") + "(ptr " + src + ")");
         line("  " + len1 + " = add " + szTy + " " + len + ", 1");
-        line("  " + buf + " = call ptr @malloc(" + szTy + " " + len1 + ")");
-        line("  call void @memcpy(ptr " + buf + ", ptr " + src + ", " + szTy + " " + len1 + ")");
+        line("  " + buf + " = call ptr @" + rtSym("alloc") + "(" + szTy + " " + len1 + ")");
+        line("  call void @" + rtSym("memcpy") + "(ptr " + buf + ", ptr " + src + ", " + szTy + " " + len1 + ")");
     }
     line("  br label %" + endLbl);
 

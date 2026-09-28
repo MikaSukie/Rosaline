@@ -11,6 +11,8 @@ public:
             const std::string& tdl   = "",
             const std::string& triple = "");
 
+    void setPermissive(bool on) { permissive_ = on; }
+
     std::string emit();
 
 private:
@@ -61,6 +63,28 @@ private:
     std::unordered_set<std::string> emittedFuncs_;
     bool hasGlobalInit_ = false;
     bool hasGlobalFini_ = false;
+    bool permissive_    = false;
+    bool raw_           = false;
+
+    std::unordered_map<std::string, std::string> rtHooks_;
+    std::unordered_set<std::string>              rtReported_;
+    std::unordered_set<std::string>              rtUsedUnhooked_;
+    std::unordered_set<std::string>              rtDeclared_;
+    std::unordered_set<std::string>              permissiveDecls_;
+    std::vector<std::string>                     permissiveDeclLines_;
+    std::unordered_map<std::string, ResolvedTyPtr> implicitGlobals_;
+    std::unordered_set<std::string> unmangledGlobals_;
+    std::unordered_set<std::string> staticStrGlobals_;
+    std::string gsym(const std::string& name) const {
+        if (unmangledGlobals_.count(name)) return "@\"\\01" + name + "\"";
+        return "@" + name;
+    }
+    ResolvedTyPtr implicitExternGlobal(const std::string& name,
+                                       const ResolvedTyPtr& hint = nullptr);
+    bool                                         usedAsValue_ = true;
+    std::string rtSym(const std::string& kind, const SourceLoc* loc = nullptr);
+    bool        rtAvailable(const std::string& kind) const;
+    void        emitRtDeclares();
 
     struct MonoWork {
         MonoKey    key;
@@ -120,6 +144,8 @@ private:
     ResolvedTyPtr globalSymbolType(const std::string& name) const;
     void emitStringConst(const std::string& val, const std::string& symName);
     std::string emitOwnedStrCopy(const std::string& src);
+    static std::string escapeIRString(const std::string& val);
+    bool        staticStrGlobal(const GlobalDecl& g, std::string& literal) const;
     void emitFunc(const FuncDecl& fd, const SubstMap& subst,
                   const std::string& mangledName);
     void emitFuncSignature(std::ostringstream& os,

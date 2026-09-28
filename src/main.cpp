@@ -134,11 +134,18 @@ int main(int argc, char** argv) {
         }
 
         CodeGen cg(*prog, sema, diag, sf, tdl, ttriple);
+        size_t preCg = diag.diags.size();
         std::string ir = cg.emit();
 
         if (diag.hasErrors) {
             diag.printAll(sf.get());
             return 1;
+        }
+        for (size_t i = preCg; i < diag.diags.size(); ++i) {
+            auto& d2 = diag.diags[i];
+            DiagEngine tmp;
+            tmp.emit(d2.level, d2.loc, d2.message, d2.lineText);
+            tmp.printAll(sf.get());
         }
 
         if (outputFile.empty() || outputFile == "-") {
@@ -178,7 +185,16 @@ int main(int argc, char** argv) {
         }
 
         CodeGen cg(*prog, sema, diag, sf, tdl, ttriple);
+        cg.setPermissive(true);
+        size_t preCg = diag.diags.size();
         std::string ir = cg.emit();
+        for (size_t i = preCg; i < diag.diags.size(); ++i) {
+            auto& d2 = diag.diags[i];
+            if (d2.level == DiagLevel::Error) continue;
+            DiagEngine tmp;
+            tmp.emit(d2.level, d2.loc, d2.message, d2.lineText);
+            tmp.printAll(sf.get());
+        }
 
         if (outputFile.empty() || outputFile == "-")
             std::cout << ir;

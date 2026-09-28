@@ -141,7 +141,7 @@ std::string CodeGen::zeroVal(const ResolvedTyPtr& ty) const {
 void CodeGen::emitAggrCopy(const std::string& dst, const std::string& src,
                            const ResolvedTyPtr& ty) {
     const std::string szTy = is32bit() ? "i32" : "i64";
-    line("  call void @memcpy(ptr " + dst + ", ptr " + src +
+    line("  call void @" + rtSym("memcpy") + "(ptr " + dst + ", ptr " + src +
          ", " + szTy + " " + std::to_string(llvmByteSize(ty)) + ")");
 }
 
@@ -419,6 +419,11 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             if (it != varTypes_.end()) return it->second;
             auto gty = globalSymbolType(x.name);
             if (gty) return gty;
+            if (permissive_ && !sema_.funcs().count(x.name)) {
+                auto ii = implicitGlobals_.find(x.name);
+                if (ii != implicitGlobals_.end()) return ii->second;
+                return ptrBits_ == 32 ? Ty::I32() : Ty::I64();
+            }
             return Ty::Void();
         }
         if constexpr (std::is_same_v<T, StructInitExpr>) {
@@ -590,16 +595,35 @@ std::string CodeGen::allocaFor(const std::string& name, const ResolvedTyPtr& ty)
     return ptr;
 }
 
+ResolvedTyPtr CodeGen::implicitExternGlobal(const std::string& name,
+                                            const ResolvedTyPtr& hint) {
+    auto it = implicitGlobals_.find(name);
+    if (it != implicitGlobals_.end()) return it->second;
+    ResolvedTyPtr ty = hint;
+    if (!ty || ty->isVoid() || ty->isError() || ty->isGeneric())
+        ty = (ptrBits_ == 32) ? Ty::I32() : Ty::I64();
+    implicitGlobals_[name] = ty;
+    return ty;
+}
+
 std::string CodeGen::loadVar(const std::string& name) {
     auto ait = varAlloca_.find(name);
     if (ait == varAlloca_.end()) {
         auto gty = globalSymbolType(name);
         if (gty) {
-            if (isAggTy(gty)) return "@" + name;
+            if (isAggTy(gty)) return gsym(name);
+            if (staticStrGlobals_.count(name)) return gsym(name);
             std::string tmp = newTmp();
             int align = validAlign(llvmByteSize(gty));
             line("  " + tmp + " = load " + llvmTy(gty) +
-                 ", ptr @" + name + ", align " + std::to_string(align));
+                 ", ptr " + gsym(name) + ", align " + std::to_string(align));
+            return tmp;
+        }
+        if (permissive_ && !sema_.funcs().count(name)) {
+            auto ity = implicitExternGlobal(name);
+            std::string tmp = newTmp();
+            line("  " + tmp + " = load " + llvmTy(ity) + ", ptr @" + name +
+                 ", align " + std::to_string(validAlign(llvmByteSize(ity))));
             return tmp;
         }
         if (sema_.funcs().count(name)) {
@@ -650,26 +674,34 @@ void CodeGen::storeVar(const std::string& name, const std::string& val,
             }
 
             std::string oldPtr = newTmp();
-            line("  " + oldPtr + " = load ptr, ptr @" + name + ", align 8");
+            line("  " + oldPtr + " = load ptr, ptr " + gsym(name) + ", align 8");
             emitStrFree(oldPtr);
 
-            line("  store ptr " + storeVal + ", ptr @" + name + ", align 8");
+            line("  store ptr " + storeVal + ", ptr " + gsym(name) + ", align 8");
             return;
         }
 
         if (isAggTy(gty)) {
-            emitAggrCopy("@" + name, val, gty);
+            emitAggrCopy(gsym(name), val, gty);
             return;
         }
 
         int align = validAlign(llvmByteSize(gty));
-        line("  store " + llvmTy(gty) + " " + val + ", ptr @" + name +
+        line("  store " + llvmTy(gty) + " " + val + ", ptr " + gsym(name) +
              ", align " + std::to_string(align));
         return;
     }
 
     auto ait = varAlloca_.find(name);
-    if (ait == varAlloca_.end()) return;
+    if (ait == varAlloca_.end()) {
+        if (permissive_ && !sema_.funcs().count(name)) {
+            auto ity = implicitExternGlobal(name, ty);
+            if (isAggTy(ity)) { emitAggrCopy("@" + name, val, ity); return; }
+            line("  store " + llvmTy(ity) + " " + val + ", ptr @" + name +
+                 ", align " + std::to_string(validAlign(llvmByteSize(ity))));
+        }
+        return;
+    }
     if (isAggTy(ty)) {
         if (val == "zeroinitializer")
             line("  store " + llvmTy(ty) + " zeroinitializer, ptr " + ait->second);
@@ -801,7 +833,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
             std::string localPtr = "%" + p.name + ".local";
             line("  " + localPtr + " = alloca " + llvmTy(pty) +
                  ", align " + std::to_string(align));
-            line("  call void @memcpy(ptr " + localPtr + ", ptr %" + p.name +
+            line("  call void @" + rtSym("memcpy") + "(ptr " + localPtr + ", ptr %" + p.name +
                  ", " + szTy + " " + std::to_string(sz) + ")");
             varAlloca_[p.name] = localPtr;
             varTypes_[p.name]  = pty;
@@ -814,7 +846,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     pushDropScope();
 
     if (fd.isMain) {
-        if (hasGlobalFini_)
+        if (hasGlobalFini_ && !raw_)
             line("  call i32 @atexit(ptr @__rosaline_global_fini)");
         if (hasGlobalInit_)
             line("  call void @__rosaline_global_init()");
@@ -846,7 +878,12 @@ void CodeGen::emitStmt(const Stmt& s) {
         using T = std::decay_t<decltype(x)>;
 
         if constexpr (std::is_same_v<T, VarDeclStmt>)    emitVarDecl(x, s.loc);
-        else if constexpr (std::is_same_v<T, ExprStmt>)  emitExpr(*x.expr);
+        else if constexpr (std::is_same_v<T, ExprStmt>) {
+            bool saved = usedAsValue_;
+            usedAsValue_ = !x.expr->template is<CallExpr>();
+            emitExpr(*x.expr);
+            usedAsValue_ = saved;
+        }
         else if constexpr (std::is_same_v<T, ReturnStmt>) emitReturn(x, curRetTy_);
         else if constexpr (std::is_same_v<T, IfStmt>)    emitIf(x);
         else if constexpr (std::is_same_v<T, WhileStmt>) emitWhile(x);
@@ -1347,7 +1384,7 @@ std::string CodeGen::emitExpr(const Expr& e) {
                     return "@" + id.name;
                 auto ait = varAlloca_.find(id.name);
                 if (ait != varAlloca_.end()) return ait->second;
-                if (isGlobalSymbol(id.name)) return "@" + id.name;
+                if (isGlobalSymbol(id.name)) return gsym(id.name);
             }
             return emitLValuePtr(*x.operand, e.loc);
         }
@@ -1650,7 +1687,11 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
         const std::string& name = e.template as<IdentExpr>().name;
         auto ait = varAlloca_.find(name);
         if (ait != varAlloca_.end()) return ait->second;
-        if (isGlobalSymbol(name)) return "@" + name;
+        if (isGlobalSymbol(name)) return gsym(name);
+        if (permissive_ && !sema_.funcs().count(name)) {
+            implicitExternGlobal(name);
+            return "@" + name;
+        }
     }
 
     if (e.template is<DerefExpr>()) {
@@ -1678,7 +1719,7 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
             auto ait = varAlloca_.find(varName);
             if (ait != varAlloca_.end()) basePtr = ait->second;
             else {
-                if (isGlobalSymbol(varName)) basePtr = "@" + varName;
+                if (isGlobalSymbol(varName)) basePtr = gsym(varName);
             }
             if (!basePtr.empty()) {
                 auto idxTy  = exprType(*ix.idx);
@@ -1729,7 +1770,7 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
                 auto ait = varAlloca_.find(objName);
                 std::string startPtr;
                 if (ait != varAlloca_.end()) startPtr = ait->second;
-                else if (isGlobalSymbol(objName)) startPtr = "@" + objName;
+                else if (isGlobalSymbol(objName)) startPtr = gsym(objName);
 
                 if (!startPtr.empty()) {
                     if (autoDeref) {
@@ -2239,16 +2280,16 @@ std::string CodeGen::emitStringConcat(const std::string& lv, const std::string& 
     const std::string szTy = is32bit() ? "i32" : "i64";
     std::string ll = newTmp();
     std::string rl = newTmp();
-    line("  " + ll + " = call " + szTy + " @strlen(ptr " + lv + ")");
-    line("  " + rl + " = call " + szTy + " @strlen(ptr " + rv + ")");
+    line("  " + ll + " = call " + szTy + " @" + rtSym("strlen") + "(ptr " + lv + ")");
+    line("  " + rl + " = call " + szTy + " @" + rtSym("strlen") + "(ptr " + rv + ")");
     std::string tot = newTmp();
     line("  " + tot + " = add " + szTy + " " + ll + ", " + rl);
     std::string tot1 = newTmp();
     line("  " + tot1 + " = add " + szTy + " " + tot + ", 1");
     std::string buf = newTmp();
-    line("  " + buf + " = call ptr @malloc(" + szTy + " " + tot1 + ")");
-    line("  call void @strcpy(ptr " + buf + ", ptr " + lv + ")");
-    line("  call void @strcat(ptr " + buf + ", ptr " + rv + ")");
+    line("  " + buf + " = call ptr @" + rtSym("alloc") + "(" + szTy + " " + tot1 + ")");
+    line("  call void @" + rtSym("strcpy") + "(ptr " + buf + ", ptr " + lv + ")");
+    line("  call void @" + rtSym("strcat") + "(ptr " + buf + ", ptr " + rv + ")");
     return buf;
 }
 
@@ -2376,7 +2417,7 @@ std::string CodeGen::emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc&
             if (ait != varAlloca_.end()) {
                 basePtr = resolveBase(ait->second);
             } else {
-                if (isGlobalSymbol(objName)) basePtr = resolveBase("@" + objName);
+                if (isGlobalSymbol(objName)) basePtr = resolveBase(gsym(objName));
             }
 
             if (!basePtr.empty()) {
@@ -2587,6 +2628,51 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             return tmp;
         }
 
+        if (permissive_) {
+            std::vector<std::string> argVals, argTys;
+            const bool wasValue = usedAsValue_;
+            usedAsValue_ = true;
+            for (auto& a : c.args) {
+                auto aty = exprType(*a);
+                std::string v = emitExpr(*a);
+                if (aty && isAggTy(aty)) { argTys.push_back("ptr"); }
+                else                     { argTys.push_back(aty && !aty->isVoid() ? llvmTy(aty) : "i32"); }
+                argVals.push_back(v);
+            }
+            usedAsValue_ = wasValue;
+            std::string retLLVM = "void";
+            if (usedAsValue_) {
+                auto cit = currentSubst_.find("#ctx");
+                if (cit != currentSubst_.end() && cit->second &&
+                    !cit->second->isGeneric() && !cit->second->isVoid())
+                    retLLVM = llvmTy(cit->second);
+                else
+                    retLLVM = "i32";
+            }
+            std::string args;
+            for (size_t i = 0; i < argVals.size(); ++i) {
+                if (i) args += ", ";
+                args += argTys[i] + " " + argVals[i];
+            }
+            std::string sigParams;
+            for (size_t i = 0; i < argTys.size(); ++i) {
+                if (i) sigParams += ", ";
+                sigParams += argTys[i];
+            }
+            std::string key = fname + "|" + retLLVM + "|" + sigParams;
+            if (!permissiveDecls_.count(key)) {
+                permissiveDecls_.insert(key);
+                permissiveDeclLines_.push_back("declare " + retLLVM + " @" + fname +
+                                               "(" + sigParams + ")");
+            }
+            if (retLLVM == "void") {
+                line("  call void @" + fname + "(" + args + ")");
+                return "undef";
+            }
+            std::string tmp = newTmp();
+            line("  " + tmp + " = call " + retLLVM + " @" + fname + "(" + args + ")");
+            return tmp;
+        }
         diag_.error(loc, std::format("unknown function '{}'", fname), lineFor(loc));
         return "undef";
     }
@@ -3232,7 +3318,7 @@ void CodeGen::emitDropEntry(const DropEntry& de) {
             storagePtr = ait->second;
         } else {
             if (!isGlobalSymbol(de.varName)) return;
-            storagePtr = "@" + de.varName;
+            storagePtr = gsym(de.varName);
         }
         std::string ptr = newTmp();
         line("  " + ptr + " = load ptr, ptr " + storagePtr + ", align 8");
@@ -3254,7 +3340,7 @@ void CodeGen::emitStrFree(const std::string& llvmPtr) {
     line("  " + nn + " = icmp ne ptr " + llvmPtr + ", null");
     line("  br i1 " + nn + ", label %" + freeLbl + ", label %" + skipLbl);
     line(freeLbl + ":");
-    line("  call void @free(ptr " + llvmPtr + ")");
+    line("  call void @" + rtSym("free") + "(ptr " + llvmPtr + ")");
     line("  br label %" + skipLbl);
     line(skipLbl + ":");
 }
@@ -3307,7 +3393,7 @@ void CodeGen::emitEnumPayloadDrop(const std::string& varName,
         varAddr = ait->second;
     } else {
         if (!isGlobalSymbol(varName)) return;
-        varAddr = "@" + varName;
+        varAddr = gsym(varName);
     }
 
     std::string tagPtr = newTmp();

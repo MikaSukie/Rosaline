@@ -388,6 +388,10 @@ Token Lexer::lexDirective(int sL, int sC) {
     } else if (name == "raw") {
         t.kind = TK::DirRaw;
         t.text = "@raw";
+    } else if (name == "alloc" || name == "free" || name == "memcpy" ||
+               name == "strlen" || name == "strcpy" || name == "strcat") {
+        t.kind = TK::DirRt;
+        t.text = "@" + name;
     } else {
         t.kind = TK::At;
         t.text = "@" + name;
