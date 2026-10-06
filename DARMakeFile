@@ -1,5 +1,5 @@
 # Rosaline macOS/Darwin Homebrew LLVM
-CXX      := /opt/homebrew/opt/llvm/bin/clang++
+CXX      := /Library/Developer/CommandLineTools/usr/bin/clang++
 CXXFLAGS := -std=c++23 -O2 -Wall -Wextra -Wpedantic \
             -fcolor-diagnostics -fdiagnostics-color=always \
             -pipe -MMD -MP
