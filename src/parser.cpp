@@ -154,8 +154,8 @@ void Parser::parseTopLevel(Program& prog) {
         if (looksLikeTypeParams && depth == 0 &&
             scan < toks_.size() && toks_[scan].kind == TK::Lparen) {
             prog.funcs.push_back(parseFuncDecl());
-            return;
-        }
+        return;
+            }
     }
 
     if (isTypeStart()) {
@@ -213,10 +213,10 @@ std::unique_ptr<ExternDecl> Parser::parseExternDecl() {
         expect(TK::Rparen, "expected ')' after extern parameters");
         if (check(TK::Semi)) {
             diag_.error(cur().loc,
-                std::format("extern '{}' is missing a return type; "
-                            "use 'void' if the function returns nothing",
-                            ed->name),
-                lineFor(cur().loc));
+                        std::format("extern '{}' is missing a return type; "
+                        "use 'void' if the function returns nothing",
+                        ed->name),
+                        lineFor(cur().loc));
             auto vt = std::make_unique<TypeNode>();
             vt->v = PrimType{PrimKind::Void};
             ed->retType = std::move(vt);
@@ -325,10 +325,10 @@ std::unique_ptr<FuncDecl> Parser::parseFuncDecl() {
 
     if (check(TK::Lbrace)) {
         diag_.error(cur().loc,
-            std::format("function '{}' is missing a return type; "
-                        "use 'void' if the function returns nothing",
-                        fd->name),
-            lineFor(cur().loc));
+                    std::format("function '{}' is missing a return type; "
+                    "use 'void' if the function returns nothing",
+                    fd->name),
+                    lineFor(cur().loc));
         auto vt = std::make_unique<TypeNode>();
         vt->v = PrimType{PrimKind::Void};
         fd->retType = std::move(vt);
@@ -612,8 +612,8 @@ TypeNodePtr Parser::parseBaseType() {
             }
             expect(TK::Rparen, "expected ')' after function type parameters");
             bool retFollowedByName = check(TK::Ident) &&
-                (check(TK::Comma, 1) || check(TK::Rparen, 1) || check(TK::Semi, 1) ||
-                 check(TK::Assign, 1) || check(TK::Lbrace, 1));
+            (check(TK::Comma, 1) || check(TK::Rparen, 1) || check(TK::Semi, 1) ||
+            check(TK::Assign, 1) || check(TK::Lbrace, 1));
             if (isTypeStart() && !retFollowedByName) {
                 ft.retType = parseType();
             } else {
@@ -708,8 +708,8 @@ StmtPtr Parser::parseStmt() {
             consume();
         } else {
             diag_.error(cur().loc,
-                "expected string literal for asm template inside '@asm { ... }'",
-                lineFor(cur().loc));
+                        "expected string literal for asm template inside '@asm { ... }'",
+                        lineFor(cur().loc));
             ab.asmTemplate = "";
         }
 
@@ -780,10 +780,10 @@ StmtPtr Parser::parseStmt() {
     auto expr = parseExpr();
     if (!check(TK::Semi)) {
         diag_.error(cur().loc,
-            std::format("expected ';' after expression, got '{}'", cur().text),
-            lineFor(cur().loc));
+                    std::format("expected ';' after expression, got '{}'", cur().text),
+                    lineFor(cur().loc));
         if (!check(TK::Rbrace) && !atEnd())
-            {}
+        {}
     } else {
         consume();
     }
@@ -1041,20 +1041,26 @@ ExprPtr Parser::parseMulDiv() {
 ExprPtr Parser::parseUnary() {
     SourceLoc loc = cur().loc;
 
-    if (check(TK::Lparen) && isTypeStart(1)) {
+    if (check(TK::Lbracket) && isTypeStart(1)) {
         size_t saved          = pos_;
         size_t savedDiagCount = diag_.diags.size();
         bool   savedHasErrors = diag_.hasErrors;
         consume();
-        if (isTypeStart()) {
-            TypeNodePtr tp;
-            try { tp = parseType(); } catch(...) {
-                pos_ = saved;
-                diag_.diags.resize(savedDiagCount);
-                diag_.hasErrors = savedHasErrors;
-                goto not_cast;
+        TK firstKind = cur().kind;
+        TypeNodePtr tp = parseType();
+        if (diag_.diags.size() == savedDiagCount && check(TK::Rbracket)) {
+            TK next = peek(1).kind;
+            bool operandFollows = false;
+            switch (next) {
+                case TK::IntLit: case TK::FloatLit: case TK::StringLit:
+                case TK::CharLit: case TK::True: case TK::False:
+                case TK::Ident: case TK::Lparen: case TK::Bang: case TK::Tilde:
+                    operandFollows = true; break;
+                case TK::Minus: case TK::Star: case TK::Amp:
+                    operandFollows = (firstKind != TK::Ident); break;
+                default: break;
             }
-            if (diag_.diags.size() == savedDiagCount && check(TK::Rparen)) {
+            if (operandFollows) {
                 consume();
                 auto operand = parseUnary();
                 auto e = std::make_unique<Expr>();
@@ -1066,7 +1072,6 @@ ExprPtr Parser::parseUnary() {
         diag_.hasErrors = savedHasErrors;
         pos_ = saved;
     }
-    not_cast:
 
     if (check(TK::Bang)) {
         consume();
