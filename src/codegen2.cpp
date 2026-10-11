@@ -2,6 +2,14 @@
 #include <cstring>
 
 void CodeGen::line(const std::string& s) {
+    // Hoist static allocas to the entry block so loops don't grow the stack.
+    if (hoistAllocas_ && s.size() > 4 && s[0] == ' ' && s[1] == ' ' &&
+        s.find(" = alloca ") != std::string::npos &&
+        s.find(", i64 %")    == std::string::npos &&
+        s.find(", i32 %")    == std::string::npos) {
+        hoistedAllocas_.push_back(s);
+        return;
+    }
     if (!s.empty() && s[0] != ' ' && s[0] != '\t' && s.back() == ':') {
         blockTerminated_ = false;
         *fnOut_ << s << "\n";
@@ -810,6 +818,12 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     emitFuncSignature(*fnOut_, mangledName, fd, subst);
     line("entry:");
 
+    std::ostringstream  bodyOs;
+    std::ostringstream* realOut = fnOut_;
+    fnOut_ = &bodyOs;
+    hoistedAllocas_.clear();
+    hoistAllocas_ = true;
+
     for (auto& p : fd.params) {
         ResolvedTyPtr pty;
         if (fd.isMain) {
@@ -871,6 +885,12 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     }
 
     line("}");
+
+    hoistAllocas_ = false;
+    fnOut_ = realOut;
+    for (auto& a : hoistedAllocas_) *fnOut_ << a << "\n";
+    *fnOut_ << bodyOs.str();
+    hoistedAllocas_.clear();
 }
 
 void CodeGen::emitStmt(const Stmt& s) {

@@ -109,6 +109,8 @@ private:
         const SourceLoc& loc);
 
     std::ostringstream*  fnOut_ = nullptr;
+    bool                     hoistAllocas_ = false;
+    std::vector<std::string> hoistedAllocas_;
     int                  tmpIdx_  = 0;
     int                  labelIdx_= 0;
 
