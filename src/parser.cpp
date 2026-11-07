@@ -3,9 +3,24 @@
 
 static const Token EOF_TOKEN = {TK::Eof, "<eof>", {"", 0, 0, 1}};
 
+namespace {
+    struct StructInitScope {
+        bool& ref; bool saved;
+        StructInitScope(bool& r, bool v) : ref(r), saved(r) { ref = v; }
+        ~StructInitScope() { ref = saved; }
+    };
+}
+
 Parser::Parser(std::span<const Token> tokens, DiagEngine& diag,
                std::shared_ptr<SourceFile> sf)
-: toks_(tokens), diag_(diag), sf_(std::move(sf)) {}
+: toks_(tokens), diag_(diag), sf_(std::move(sf)) {
+    for (size_t i = 0; i + 1 < toks_.size(); ++i) {
+        TK k = toks_[i].kind;
+        if ((k == TK::Struct || k == TK::Enum || k == TK::Opaque) &&
+            toks_[i + 1].kind == TK::Ident)
+            typeNames_.insert(toks_[i + 1].text);
+    }
+}
 
 const Token& Parser::peek(int offset) const {
     size_t idx = pos_ + offset;
@@ -1041,23 +1056,31 @@ ExprPtr Parser::parseMulDiv() {
 ExprPtr Parser::parseUnary() {
     SourceLoc loc = cur().loc;
 
-    if (check(TK::Lbracket) && isTypeStart(1)) {
+    if ((check(TK::Lparen) || check(TK::Lbracket)) && isTypeStart(1)) {
         size_t saved          = pos_;
         size_t savedDiagCount = diag_.diags.size();
         bool   savedHasErrors = diag_.hasErrors;
+        TK     closer         = check(TK::Lparen) ? TK::Rparen : TK::Rbracket;
         consume();
-        TK firstKind = cur().kind;
         TypeNodePtr tp = parseType();
-        if (diag_.diags.size() == savedDiagCount && check(TK::Rbracket)) {
+        if (diag_.diags.size() == savedDiagCount && check(closer)) {
+            bool bareName = tp->isNamed() && tp->asNamed().typeArgs.empty() &&
+            !isGenericTypeName(tp->asNamed().name);
+            bool knownType = bareName && typeNames_.count(tp->asNamed().name) > 0;
+            bool ambiguous = bareName && !knownType;
+
             TK next = peek(1).kind;
             bool operandFollows = false;
             switch (next) {
                 case TK::IntLit: case TK::FloatLit: case TK::StringLit:
                 case TK::CharLit: case TK::True: case TK::False:
-                case TK::Ident: case TK::Lparen: case TK::Bang: case TK::Tilde:
+                case TK::Ident: case TK::Bang: case TK::Tilde:
+                case TK::Readonly: case TK::Take: case TK::Release:
+                case TK::Check: case TK::Claim:
+                case TK::Match: case TK::Typeswitch:
                     operandFollows = true; break;
-                case TK::Minus: case TK::Star: case TK::Amp:
-                    operandFollows = (firstKind != TK::Ident); break;
+                case TK::Lparen: case TK::Minus: case TK::Star: case TK::Amp: case TK::Lbracket:
+                    operandFollows = !ambiguous; break;
                 default: break;
             }
             if (operandFollows) {
@@ -1111,6 +1134,7 @@ ExprPtr Parser::parseUnary() {
 
     if (check(TK::Readonly)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
@@ -1120,6 +1144,7 @@ ExprPtr Parser::parseUnary() {
     }
     if (check(TK::Take)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
@@ -1129,6 +1154,7 @@ ExprPtr Parser::parseUnary() {
     }
     if (check(TK::Release)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
@@ -1138,6 +1164,7 @@ ExprPtr Parser::parseUnary() {
     }
     if (check(TK::Check)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
@@ -1145,6 +1172,7 @@ ExprPtr Parser::parseUnary() {
     }
     if (check(TK::Claim)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
@@ -1171,6 +1199,7 @@ ExprPtr Parser::parsePostfix(ExprPtr base) {
 
         if (check(TK::Lbracket)) {
             consume();
+            StructInitScope allowStructs(noStructInit_, false);
             auto idx = parseExpr();
             expect(TK::Rbracket, "expected ']'");
             auto e = std::make_unique<Expr>();
@@ -1182,6 +1211,7 @@ ExprPtr Parser::parsePostfix(ExprPtr base) {
 
         if (check(TK::Lparen) && !base->is<IdentExpr>()) {
             consume();
+            StructInitScope allowStructs(noStructInit_, false);
             CallExpr call;
             call.callee = std::move(base);
             if (!check(TK::Rparen)) {
@@ -1249,6 +1279,7 @@ ExprPtr Parser::parsePrimary() {
 
     if (check(TK::Lparen)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         auto inner = parseExpr();
         expect(TK::Rparen, "expected ')'");
         return inner;
@@ -1256,6 +1287,7 @@ ExprPtr Parser::parsePrimary() {
 
     if (check(TK::Lbracket)) {
         consume();
+        StructInitScope allowStructs(noStructInit_, false);
         auto e = std::make_unique<Expr>();
         e->loc = loc;
         ArrayLitExpr alit;
@@ -1290,6 +1322,7 @@ ExprPtr Parser::parsePrimary() {
             ea.variant  = variant;
             if (check(TK::Lparen)) {
                 consume();
+                StructInitScope allowStructs(noStructInit_, false);
                 if (!check(TK::Rparen)) {
                     ea.args.push_back(parseExpr());
                     while (match(TK::Comma)) {
@@ -1332,6 +1365,7 @@ ExprPtr Parser::parsePrimary() {
         bool isCall       = check(TK::Lparen);
         bool isGenericCall = check(TK::Lt) && looksLikeGenericCall();
         if (isCall || isGenericCall) {
+            StructInitScope allowStructs(noStructInit_, false);
             CallExpr call;
             auto callee = std::make_unique<Expr>();
             callee->loc = loc; callee->v = IdentExpr{name};

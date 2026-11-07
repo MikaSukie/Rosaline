@@ -77,5 +77,6 @@ private:
 
     std::unordered_set<std::string> genericParamsInScope_;
     bool noStructInit_ = false;
+    std::unordered_set<std::string> typeNames_;
     void synchronize(std::initializer_list<TK> stops);
 };

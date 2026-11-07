@@ -2,7 +2,6 @@
 #include <cstring>
 
 void CodeGen::line(const std::string& s) {
-    // Hoist static allocas to the entry block so loops don't grow the stack.
     if (hoistAllocas_ && s.size() > 4 && s[0] == ' ' && s[1] == ' ' &&
         s.find(" = alloca ") != std::string::npos &&
         s.find(", i64 %")    == std::string::npos &&
@@ -96,6 +95,27 @@ static std::string formatLLVMFloat(double v, bool asFloat32) {
     return oss.str();
 }
 
+static bool foldIntLiteral(const Expr& e, int64_t& out) {
+    if (e.is<IntLitExpr>()) { out = e.as<IntLitExpr>().val; return true; }
+    if (e.is<UnaryOpExpr>()) {
+        auto& u = e.as<UnaryOpExpr>();
+        int64_t inner;
+        if (u.op == "-" && u.operand && foldIntLiteral(*u.operand, inner)) {
+            out = (int64_t)(0 - (uint64_t)inner);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool isPureIntLiteral(const Expr& e) {
+    if (e.is<IntLitExpr>()) return true;
+    if (e.is<UnaryOpExpr>()) {
+        auto& u = e.as<UnaryOpExpr>();
+        return u.op == "-" && u.operand && isPureIntLiteral(*u.operand);
+    }
+    return false;
+}
 
 std::string CodeGen::emitIntLit(int64_t v, const ResolvedTyPtr& ty) {
     if (ty && ty->isFloat()) {
@@ -412,7 +432,12 @@ std::string CodeGen::emitLoadAbiChunk(const std::string& basePtr,
 ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
     return std::visit([&](auto& x) -> ResolvedTyPtr {
         using T = std::decay_t<decltype(x)>;
-        if constexpr (std::is_same_v<T, IntLitExpr>)    return Ty::I32();
+        if constexpr (std::is_same_v<T, IntLitExpr>) {
+            auto ctxIt = currentSubst_.find("#ctx");
+            if (ctxIt != currentSubst_.end() && ctxIt->second && ctxIt->second->isFloat())
+                return ctxIt->second;
+            return Ty::I32();
+        }
         if constexpr (std::is_same_v<T, FloatLitExpr>) {
             auto ctxIt = currentSubst_.find("#ctx");
             if (ctxIt != currentSubst_.end() && ctxIt->second && ctxIt->second->isFloat())
@@ -1123,6 +1148,8 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
              vd.init->template is<IntLitExpr>()   ||
              vd.init->template is<UnaryOpExpr>()  ||
              vd.init->template is<BinOpExpr>());
+        if (!initIsCtxFloat && ty && ty->isFloat() && isPureIntLiteral(*vd.init))
+            initIsCtxFloat = true;
 
         if (initIsCtxFloat) {
             storeVar(effectiveName, val, ty);
@@ -1836,15 +1863,19 @@ std::string CodeGen::emitLValuePtr(const Expr& e, const SourceLoc& loc) {
 }
 
 std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
+    ResolvedTyPtr ctxFloatTy;
     {
         auto lhsTy = exprType(*a.lhs);
         if (lhsTy && !lhsTy->isGeneric() && !lhsTy->isVoid() &&
-            (lhsTy->isInteger() || lhsTy->isFloat()))
+            (lhsTy->isInteger() || lhsTy->isFloat())) {
             currentSubst_["#ctx"] = lhsTy;
+            if (lhsTy->isFloat()) ctxFloatTy = lhsTy;
+        }
     }
     std::string rval = emitExpr(*a.rhs);
     currentSubst_.erase("#ctx");
     auto rty = exprType(*a.rhs);
+    if (ctxFloatTy && isPureIntLiteral(*a.rhs)) rty = ctxFloatTy;
     ResolvedTyPtr rvalTy = rty;
 
     if (a.op != "=") {
@@ -2314,12 +2345,28 @@ std::string CodeGen::emitStringConcat(const std::string& lv, const std::string& 
 }
 
 std::string CodeGen::emitCast(const CastExpr& c) {
-    auto fromTy = exprType(*c.operand);
     auto toTy   = sema_.resolveType(*c.type, currentSubst_);
+
+    if (toTy && toTy->isInteger() && toTy->kind != TyKind::Bool) {
+        int64_t lit;
+        if (foldIntLiteral(*c.operand, lit)) {
+            int bw = toTy->bitWidth(ptrBits_);
+            if (bw > 0 && bw < 64) {
+                uint64_t mask = (1ULL << bw) - 1;
+                uint64_t u = (uint64_t)lit & mask;
+                if (toTy->isSigned() && (u >> (bw - 1)))
+                    lit = (int64_t)u - (int64_t)(1ULL << bw);
+                else
+                    lit = (int64_t)u;
+            }
+            return std::to_string(lit);
+        }
+    }
 
     SubstMap savedCast = currentSubst_;
     if (toTy && (toTy->isInteger() || toTy->isFloat()))
         currentSubst_["#ctx"] = toTy;
+    auto fromTy = exprType(*c.operand);
     std::string v = emitExpr(*c.operand);
     currentSubst_ = savedCast;
 
@@ -2342,7 +2389,14 @@ std::string CodeGen::emitCast(const CastExpr& c) {
 
     std::string tmp = newTmp();
 
-    if (fromInt && toInt) {
+    if (toTy->kind == TyKind::Bool && (fromInt || fromFlt || fromPtr)) {
+        if (fromFlt)
+            line("  " + tmp + " = fcmp une " + fll + " " + v + ", 0.0");
+        else if (fromPtr)
+            line("  " + tmp + " = icmp ne ptr " + v + ", null");
+        else
+            line("  " + tmp + " = icmp ne " + fll + " " + v + ", 0");
+    } else if (fromInt && toInt) {
         if (toW > fromW)
             line("  " + tmp + " = " + (fromTy->isSigned()?"sext":"zext") +
                  " " + fll + " " + v + " to " + tll);
@@ -2357,7 +2411,7 @@ std::string CodeGen::emitCast(const CastExpr& c) {
         line("  " + tmp + " = " + (fromTy->isSigned()?"sitofp":"uitofp") +
              " " + fll + " " + v + " to " + tll);
     } else if (fromFlt && toFlt) {
-        if (toW > fromW)
+        if (toTy->byteSize(ptrBits_) > fromTy->byteSize(ptrBits_))
             line("  " + tmp + " = fpext " + fll + " " + v + " to " + tll);
         else
             line("  " + tmp + " = fptrunc " + fll + " " + v + " to " + tll);
