@@ -603,6 +603,15 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
         if constexpr (std::is_same_v<T, EnumAccessExpr>) {
             return Ty::Named(TyKind::Enum, x.enumName);
         }
+        if constexpr (std::is_same_v<T, ReadonlyExpr>) return exprType(*x.operand);
+        if constexpr (std::is_same_v<T, ReleaseExpr>)  return exprType(*x.operand);
+        if constexpr (std::is_same_v<T, CheckExpr>)    return exprType(*x.operand);
+        if constexpr (std::is_same_v<T, ClaimExpr>)    return exprType(*x.operand);
+        if constexpr (std::is_same_v<T, TakeExpr>) {
+            if (x.operand->template is<IdentExpr>())
+                return Ty::Ptr(exprType(*x.operand));
+            return exprType(*x.operand);
+        }
         return Ty::I32();
     }, e.v);
 }
@@ -685,7 +694,7 @@ std::string CodeGen::loadVar(const std::string& name) {
 }
 
 void CodeGen::storeVar(const std::string& name, const std::string& val,
-                       const ResolvedTyPtr& ty, bool ownedVal) {
+                       const ResolvedTyPtr& ty, bool ownedVal, bool freeOld) {
     auto isCurrentlyOwnedLocal = [&](const std::string& n) {
         for (auto it = dropScopes_.rbegin(); it != dropScopes_.rend(); ++it) {
             for (auto& de : *it) {
@@ -747,9 +756,11 @@ void CodeGen::storeVar(const std::string& name, const std::string& val,
                 storeVal = emitOwnedStrCopy(val);
             }
 
-            std::string oldPtr = newTmp();
-            line("  " + oldPtr + " = load ptr, ptr " + ait->second + ", align 8");
-            emitStrFree(oldPtr);
+            if (freeOld) {
+                std::string oldPtr = newTmp();
+                line("  " + oldPtr + " = load ptr, ptr " + ait->second + ", align 8");
+                emitStrFree(oldPtr);
+            }
 
             int align = validAlign(llvmByteSize(ty));
             line("  store ptr " + storeVal + ", ptr " + ait->second +
@@ -1019,8 +1030,9 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
     allocaFor(effectiveName, ty);
 
     if (!dropScopes_.empty()) {
-        if ((ty->isStr() || ty->isPtr()) && !vd.nomd &&
-            (isOwnedInit(vd.init.get()) || !vd.init)) {
+        if (!vd.nomd &&
+            ((ty->isStr() && (isOwnedInit(vd.init.get()) || !vd.init)) ||
+             (ty->isPtr() && isOwnedInit(vd.init.get())))) {
             addToDropScope(effectiveName, ty, DropKind::OwnedStr);
         } else if (ty->isEnum() &&
                    enumHasDroppablePayload(ty->name, ty->typeArgs)) {
@@ -1163,7 +1175,8 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
             storeVar(effectiveName, val, ty);
         } else {
             val = implicitCoerce(val, initTy, ty, *fnOut_, tmpIdx_, ptrBits_);
-            storeVar(effectiveName, val, ty);
+            storeVar(effectiveName, val, ty,
+                     ty->isStr() && isOwnedInit(vd.init.get()));
         }
     } else {
         if (isAggTy(ty))
@@ -1989,6 +2002,8 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
         }
     }
     bool rhsIsOwned = rhsIsOwnedInit || rhsIsMovedIdent;
+    bool lhsWasOwned = a.lhs->template is<IdentExpr>() &&
+        alreadyTrackedOwned(a.lhs->template as<IdentExpr>().name);
 
     if (a.op == "=" && lty && (lty->isStr() || lty->isPtr()) && rhsIsOwned) {
         if (a.lhs->template is<IdentExpr>()) {
@@ -2032,7 +2047,7 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
 
     if (a.lhs->template is<IdentExpr>()) {
         const std::string& name = a.lhs->template as<IdentExpr>().name;
-        storeVar(name, rval, lty, rhsIsOwned);
+        storeVar(name, rval, lty, rhsIsOwned, lhsWasOwned || isGlobalSymbol(name));
     } else if (isAggTy(lty)) {
         emitAggrCopy(lptr, rval, lty);
     } else {
@@ -3274,6 +3289,8 @@ std::string CodeGen::emitReadonly(const ReadonlyExpr& r) {
 }
 
 std::string CodeGen::emitTake(const TakeExpr& t) {
+    if (t.operand->template is<IdentExpr>())
+        return emitLValuePtr(*t.operand, t.operand->loc);
     return emitExpr(*t.operand);
 }
 
@@ -3437,7 +3454,7 @@ bool CodeGen::enumHasDroppablePayload(const std::string& enumName,
     for (auto& v : ed->variants) {
         for (auto& pt : v.payload) {
             auto rty = sema_.resolveType(*pt, enumSubst);
-            if (rty && (rty->isStr() || rty->isPtr()))
+            if (rty && rty->isStr())
                 return true;
         }
     }
@@ -3490,7 +3507,7 @@ void CodeGen::emitEnumPayloadDrop(const std::string& varName,
 
         for (auto& pt : v.payload) {
             auto rty = sema_.resolveType(*pt, enumSubst);
-            if (rty && (rty->isStr() || rty->isPtr())) {
+            if (rty && rty->isStr()) {
                 fields.push_back({byteOff});
                 anyDrop = true;
             }

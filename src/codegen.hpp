@@ -191,7 +191,8 @@ private:
     std::string internString(const std::string& s);
     std::string loadVar(const std::string& name);
     void        storeVar(const std::string& name, const std::string& val,
-                         const ResolvedTyPtr& ty, bool ownedVal = false);
+                         const ResolvedTyPtr& ty, bool ownedVal = false,
+                         bool freeOld = true);
     std::string allocaFor(const std::string& name, const ResolvedTyPtr& ty);
 
     std::string mangleCall(const std::string& funcName,

@@ -1168,7 +1168,9 @@ ExprPtr Parser::parseUnary() {
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
-        return parseCheckConstraints(std::move(op));
+        auto ce = parseCheckConstraints(std::move(op));
+        ce->loc = loc;
+        return ce;
     }
     if (check(TK::Claim)) {
         consume();
@@ -1176,7 +1178,9 @@ ExprPtr Parser::parseUnary() {
         expect(TK::Lparen, "expected '('");
         auto op = parseExpr();
         expect(TK::Rparen, "expected ')'");
-        return parseClaimConstraints(std::move(op));
+        auto cl = parseClaimConstraints(std::move(op));
+        cl->loc = loc;
+        return cl;
     }
 
     auto base = parsePrimary();
