@@ -15,6 +15,7 @@ void CodeGen::line(const std::string& s) {
         return;
     }
     if (s == "}") {
+        *fnOut_ << s << "\n";
         return;
     }
     if (blockTerminated_) return;
