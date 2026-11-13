@@ -15,7 +15,6 @@ void CodeGen::line(const std::string& s) {
         return;
     }
     if (s == "}") {
-        *fnOut_ << s << "\n";
         return;
     }
     if (blockTerminated_) return;
@@ -2375,6 +2374,15 @@ std::string CodeGen::emitCast(const CastExpr& c) {
                     lit = (int64_t)u;
             }
             return std::to_string(lit);
+        }
+    }
+
+    if (toTy && (toTy->isPtr() || toTy->isStr())) {
+        int64_t lit;
+        if (foldIntLiteral(*c.operand, lit)) {
+            if (lit == 0) return "null";
+            const std::string pit = (ptrBits_ == 32) ? "i32" : "i64";
+            return "inttoptr (" + pit + " " + std::to_string(lit) + " to ptr)";
         }
     }
 

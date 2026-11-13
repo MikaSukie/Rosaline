@@ -1080,6 +1080,15 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                     return Ty::Error();
                 }
             }
+            if (castTy && castTy->isInteger() && castTy->kind != TyKind::Bool &&
+                srcTy && (srcTy->isStr() || srcTy->isPtr())) {
+                diag_.warning(e.loc,
+                    std::format("casting '{}' to '{}' converts the pointer's ADDRESS to an "
+                                "integer; it does not read the pointed-to value. "
+                                "Use '*p' or 'p[0]' to read the first element",
+                                srcTy->str(), castTy->str()),
+                    lineFor(e.loc));
+            }
             return castTy;
         }
 
@@ -1132,6 +1141,7 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
                 return t->inner ? t->inner : Ty::Void();
             }
+            if (t && t->isStr()) return Ty::Char();
             return Ty::I32();
         }
 
