@@ -21,6 +21,7 @@ enum class TK {
     Readonly, Take, Release, Check, Claim,
     For,
     Fn,
+    Owned, Borrowed,
 
     Ident,
 
@@ -107,6 +108,8 @@ inline std::string tkName(TK k) {
     case TK::Claim:        return "claim";
     case TK::For:          return "for";
     case TK::Fn:           return "fn";
+    case TK::Owned:        return "owned";
+    case TK::Borrowed:     return "borrowed";
     case TK::Ident:        return "identifier";
     case TK::Plus:         return "+";
     case TK::Minus:        return "-";

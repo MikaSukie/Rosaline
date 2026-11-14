@@ -575,10 +575,10 @@ void CodeGen::emitGlobals(std::vector<GlobalDecl*>& runtimeInits) {
 
         if (!g->nomd) {
             if (ty && ty->isStr()) {
-                globalDrops_.push_back({g->name, ty, DropKind::OwnedStr});
+                globalDrops_.push_back({g->name, ty, DropKind::OwnedStr, {}, {}});
             } else if (ty && ty->isEnum() &&
                        enumHasDroppablePayload(ty->name, ty->typeArgs)) {
-                globalDrops_.push_back({g->name, ty, DropKind::EnumWithStrPayload});
+                globalDrops_.push_back({g->name, ty, DropKind::EnumWithStrPayload, {}, {}});
             }
         }
     }

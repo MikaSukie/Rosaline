@@ -146,6 +146,7 @@ private:
     ResolvedTyPtr globalSymbolType(const std::string& name) const;
     void emitStringConst(const std::string& val, const std::string& symName);
     std::string emitOwnedStrCopy(const std::string& src);
+    std::string emitOwnedStrValue(const Expr& e);
     static std::string escapeIRString(const std::string& val);
     bool        staticStrGlobal(const GlobalDecl& g, std::string& literal) const;
     void emitFunc(const FuncDecl& fd, const SubstMap& subst,
@@ -171,6 +172,9 @@ private:
     void emitGlobalFiniBody();
     std::string emitBinOp(const BinOpExpr& b, const SourceLoc& loc);
     std::string emitCall(const CallExpr& c, const SourceLoc& loc);
+    std::string emitIndirectCall(const std::string& fptr,
+                                 const ResolvedTyPtr& fpty,
+                                 const CallExpr& c);
     std::string emitStringConcat(const std::string& lv, const std::string& rv);
     std::string emitCast(const CastExpr& c);
     std::string emitFieldAccess(const FieldAccessExpr& fa, const SourceLoc& loc);
@@ -208,16 +212,26 @@ private:
     std::string   curSretPtr_;
     bool          blockTerminated_ = false;
 
-    mutable std::unordered_map<std::string, bool> strAllocCache_;
     bool funcAlwaysAllocatesStr(const std::string& fname) const;
+    bool fnPtrCallOwnsStr(const CallExpr& c) const;
 
-    enum class DropKind { OwnedStr, EnumWithStrPayload };
+    enum class DropKind { OwnedStr, EnumWithStrPayload, FlaggedStr };
 
     struct DropEntry {
         std::string   varName;
         ResolvedTyPtr ty;
         DropKind      kind;
+        std::string   flagPtr;
+        std::string   storagePtr;
     };
+
+    std::unordered_map<std::string, std::string> ownFlag_;
+    std::string makeOwnFlag();
+    void        registerFlaggedStr(const std::string& name,
+                                   const ResolvedTyPtr& ty);
+    bool        isFlaggedStr(const std::string& name) const;
+    void        emitFlaggedStrAssign(const std::string& name,
+                                     const std::string& val, bool valOwned);
 
     std::vector<std::vector<DropEntry>> dropScopes_;
     std::vector<int> loopDropDepths_;

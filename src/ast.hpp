@@ -27,6 +27,7 @@ struct HashType  {};
 struct FuncType  {
     std::vector<TypeNodePtr> paramTypes;
     TypeNodePtr              retType;
+    RetOwn                   retOwn = RetOwn::Unspecified;
 };
 
 struct TypeNode {
@@ -292,6 +293,7 @@ struct ExternDecl {
     TypeNodePtr        globalType;
     std::vector<Param> params;
     TypeNodePtr        retType;
+    RetOwn             retOwn     = RetOwn::Unspecified;
     bool               isVariadic = false;
     bool               isUnsafe   = false;
     bool               isGlobal   = false;
@@ -391,6 +393,8 @@ inline std::string TypeNode::str() const {
                 s += x.paramTypes[i]->str();
             }
             s += ")->";
+            if (x.retOwn == RetOwn::Owned)    s += "owned ";
+            if (x.retOwn == RetOwn::Borrowed) s += "borrowed ";
             s += x.retType ? x.retType->str() : "#";
             return s;
         } else if constexpr (std::is_same_v<T, HashType>) {
@@ -424,6 +428,7 @@ inline TypeNodePtr TypeNode::clone() const {
             for (auto& pt : x.paramTypes)
                 ft.paramTypes.push_back(pt->clone());
             if (x.retType) ft.retType = x.retType->clone();
+            ft.retOwn = x.retOwn;
             return ft;
         } else if constexpr (std::is_same_v<T, HashType>) {
             return HashType{};

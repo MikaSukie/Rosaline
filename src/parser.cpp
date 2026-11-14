@@ -43,7 +43,23 @@ std::string Parser::lineFor(const SourceLoc& l) const {
     return {};
 }
 
+bool Parser::atReservedWord() const {
+    return check(TK::Owned) || check(TK::Borrowed);
+}
+
+void Parser::reportReservedWord() {
+    diag_.error(cur().loc,
+                std::format("'{}' is a reserved word (it marks the ownership of a "
+                            "returned 'str') and cannot be used as a name",
+                            cur().text),
+                lineFor(cur().loc));
+}
+
 const Token& Parser::expect(TK k, std::string_view msg) {
+    if (k == TK::Ident && atReservedWord()) {
+        reportReservedWord();
+        return consume();
+    }
     if (!check(k)) {
         std::string m = msg.empty()
         ? std::format("expected '{}', got '{}'", tkName(k), cur().text)
@@ -154,6 +170,13 @@ void Parser::parseTopLevel(Program& prog) {
         return;
     }
 
+    if (atReservedWord()) {
+        reportReservedWord();
+        if (check(TK::Lparen, 1)) prog.funcs.push_back(parseFuncDecl());
+        else                      consume();
+        return;
+    }
+
     if (k == TK::Ident && check(TK::Lt, 1)) {
         size_t scan = pos_ + 2;
         int depth = 1;
@@ -236,6 +259,10 @@ std::unique_ptr<ExternDecl> Parser::parseExternDecl() {
             vt->v = PrimType{PrimKind::Void};
             ed->retType = std::move(vt);
         } else {
+            if (atRetOwnMarker()) {
+                ed->retOwn = check(TK::Owned) ? RetOwn::Owned : RetOwn::Borrowed;
+                consume();
+            }
             ed->retType = parseType();
         }
     } else {
@@ -522,6 +549,10 @@ std::vector<Param> Parser::parseParamList() {
     return params;
 }
 
+bool Parser::atRetOwnMarker() const {
+    return atReservedWord();
+}
+
 bool Parser::isTypeStart(int offset) const {
     TK k = peek(offset).kind;
     return k == TK::I8 || k == TK::I16 || k == TK::I32 || k == TK::I64
@@ -626,6 +657,13 @@ TypeNodePtr Parser::parseBaseType() {
                 }
             }
             expect(TK::Rparen, "expected ')' after function type parameters");
+            if (atRetOwnMarker()) {
+                ft.retOwn = check(TK::Owned) ? RetOwn::Owned : RetOwn::Borrowed;
+                consume();
+                ft.retType = parseType();
+                t->v = std::move(ft);
+                break;
+            }
             bool retFollowedByName = check(TK::Ident) &&
             (check(TK::Comma, 1) || check(TK::Rparen, 1) || check(TK::Semi, 1) ||
             check(TK::Assign, 1) || check(TK::Lbrace, 1));
@@ -1315,7 +1353,8 @@ ExprPtr Parser::parsePrimary() {
         return parseMatchExpr();
     }
 
-    if (check(TK::Ident)) {
+    if (check(TK::Ident) || atReservedWord()) {
+        if (atReservedWord()) reportReservedWord();
         std::string name = consume().text;
 
         if (check(TK::Arrow)) {

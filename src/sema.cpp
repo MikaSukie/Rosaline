@@ -281,6 +281,13 @@ void SemaPass::collectFuncs() {
         }
 
         sig.retType = ed->retType ? resolveType(*ed->retType) : Ty::Void();
+        if (ed->retOwn != RetOwn::Unspecified && !sig.retType->isStr() &&
+            !sig.retType->isError()) {
+            diag_.error(ed->loc,
+                std::format("'owned'/'borrowed' applies only to a 'str' return type; "
+                            "extern '{}' does not return 'str'", ed->name),
+                lineFor(ed->loc));
+        }
         if (containsIllegalReturnType(sig.retType)) {
             diag_.error(ed->loc,
                 "opaque types are only allowed as pointer targets; use a pointer for an opaque type",
@@ -1009,15 +1016,6 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
             }
             auto rt = checkExpr(*x.rhs, scope, handles, binSubst);
-            if (x.op == "+" && lt && lt->isStr() && rt && rt->isStr()) return Ty::Str();
-            {
-                auto isRawBytePtr = [](const ResolvedTyPtr& t) -> bool {
-                    if (!t || !t->isPtr()) return false;
-                    return !t->inner || t->inner->isVoid() || t->inner->kind == TyKind::I8;
-                };
-                if ((x.op == "+" || x.op == "-") && isRawBytePtr(lt) && rt && rt->isInteger())
-                    return lt;
-            }
             if (x.op == "&&" || x.op == "||") return Ty::Bool();
             if (x.op == "==" || x.op == "!=") {
                 bool ok = false;
@@ -1048,11 +1046,47 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 }
                 return Ty::Bool();
             }
-            if (rt && rt->isFloat() && lt && !lt->isFloat())
-                return rt;
-            if (lt && lt->isFloat() && rt && !rt->isFloat())
-                return lt;
-            return lt ? lt : Ty::I32();
+
+            const bool unresolved = (lt && lt->isGeneric()) || (rt && rt->isGeneric());
+            if (unresolved || !lt || !rt || lt->isError() || rt->isError())
+                return lt ? lt : Ty::I32();
+
+            const bool numericPair = lt->isNumeric() && rt->isNumeric();
+            const bool pointerIndex = lt->isPtr() && rt->isInteger();
+            const bool pointerDifference = lt->isPtr() && rt->isPtr() &&
+                                           lt->equals(*rt);
+            const bool stringPair = lt->isStr() && rt->isStr();
+            const bool integerPair = lt->isInteger() && rt->isInteger();
+            bool valid = false;
+
+            if (x.op == "+") {
+                valid = numericPair || stringPair || pointerIndex;
+                if (stringPair) return Ty::Str();
+                if (pointerIndex) return lt;
+            } else if (x.op == "-") {
+                valid = numericPair || pointerIndex || pointerDifference;
+                if (pointerIndex) return lt;
+                if (pointerDifference) return Ty::I64();
+            } else if (x.op == "*" || x.op == "/" || x.op == "%") {
+                valid = numericPair;
+            } else if (x.op == "&" || x.op == "|" || x.op == "^" ||
+                       x.op == "<<" || x.op == ">>") {
+                valid = integerPair;
+            } else {
+                valid = false;
+            }
+
+            if (!valid) {
+                diag_.error(e.loc,
+                    std::format("operator '{}' is not defined for operand types '{}' and '{}'",
+                                x.op, lt->str(), rt->str()),
+                    lineFor(e.loc));
+                return Ty::Error();
+            }
+
+            if (rt->isFloat() && !lt->isFloat()) return rt;
+            if (lt->isFloat() && !rt->isFloat()) return lt;
+            return lt;
         }
 
         if constexpr (std::is_same_v<T, UnaryOpExpr>) {
@@ -1098,11 +1132,41 @@ ResolvedTyPtr SemaPass::checkExpr(Expr& e, Scope& scope,
                 auto fit = funcs_.find(name);
                 if (fit != funcs_.end()) {
                     auto& sig = fit->second;
+                    if (sig.isExtern) {
+                        auto byValueAgg = [](const ResolvedTyPtr& t) {
+                            return t && (t->isStruct() || t->isEnum() || t->isArray());
+                        };
+                        bool agg = byValueAgg(sig.retType);
+                        for (auto& pt : sig.paramTypes) agg = agg || byValueAgg(pt);
+                        if (sig.isVariadic) {
+                            diag_.error(e.loc,
+                                std::format("cannot take the address of variadic extern '{}'; "
+                                            "wrap it in a function with a fixed parameter list",
+                                            name),
+                                lineFor(e.loc));
+                            return Ty::Error();
+                        }
+                        if (agg) {
+                            diag_.error(e.loc,
+                                std::format("cannot take the address of extern '{}': it passes or "
+                                            "returns a struct, enum or array by value using the C ABI, "
+                                            "which a function pointer call does not follow; wrap it "
+                                            "in a Rosaline function", name),
+                                lineFor(e.loc));
+                            return Ty::Error();
+                        }
+                    }
                     std::vector<ResolvedTyPtr> paramTys;
-                    if (sig.decl)
+                    if (sig.decl) {
                         for (auto& p : sig.decl->params)
                             if (p.type) paramTys.push_back(resolveType(*p.type, subst));
-                    return Ty::FuncPtr(std::move(paramTys), sig.retType);
+                    } else {
+                        paramTys = sig.paramTypes;
+                    }
+                    RetOwn own = RetOwn::Unspecified;
+                    if (sig.retType && sig.retType->isStr())
+                        own = funcAlwaysAllocatesStr(name) ? RetOwn::Owned : RetOwn::Borrowed;
+                    return Ty::FuncPtr(std::move(paramTys), sig.retType, own);
                 }
             }
             if (x.operand->template is<IdentExpr>()) {
@@ -2053,3 +2117,80 @@ void SemaPass::invalidateReadersOf(const std::string& varName, int generation,
         }
     }
 }
+
+static void collectRetVals(const std::vector<StmtPtr>& stmts,
+                            std::vector<const Expr*>& out) {
+    for (auto& s : stmts) {
+        std::visit([&](auto& x) {
+            using T = std::decay_t<decltype(x)>;
+            if constexpr (std::is_same_v<T, ReturnStmt>) {
+                if (x.value) out.push_back(x.value.get());
+            } else if constexpr (std::is_same_v<T, IfStmt>) {
+                collectRetVals(x.thenBody, out);
+                collectRetVals(x.elseBody, out);
+            } else if constexpr (std::is_same_v<T, WhileStmt>) {
+                collectRetVals(x.body, out);
+            } else if constexpr (std::is_same_v<T, BlockStmt>) {
+                collectRetVals(x.stmts, out);
+            } else if constexpr (std::is_same_v<T, ExprStmt>) {
+                if (!x.expr) return;
+                if (x.expr->template is<TypeswitchExpr>()) {
+                    for (auto& arm : x.expr->template as<TypeswitchExpr>().arms)
+                        collectRetVals(arm.body, out);
+                } else if (x.expr->template is<MatchExpr>()) {
+                    for (auto& arm : x.expr->template as<MatchExpr>().arms)
+                        collectRetVals(arm.body, out);
+                }
+            }
+        }, s->v);
+    }
+}
+
+bool SemaPass::funcAlwaysAllocatesStr(const std::string& fname) const {
+    auto cit = strAllocCache_.find(fname);
+    if (cit != strAllocCache_.end()) return cit->second;
+
+    auto cache = [&](bool v) -> bool {
+        strAllocCache_[fname] = v;
+        return v;
+    };
+
+    for (auto& ed : prog_.externs) {
+        if (ed->name != fname) continue;
+        if (!ed->retType) return cache(false);
+        auto rt = resolveType(*ed->retType);
+        const bool isStr = rt && rt->isStr();
+        if (ed->retOwn == RetOwn::Owned)    return cache(isStr);
+        if (ed->retOwn == RetOwn::Borrowed) return cache(false);
+        if (ed->isUnsafe) return cache(false);
+        return cache(isStr);
+    }
+
+    const FuncDecl* fd = prog_.findFunc(fname);
+    if (!fd) return cache(false);
+
+    if (!fd->retType || fd->retType->isHash()) return cache(false);
+    auto retTy = resolveType(*fd->retType);
+    if (!retTy || !retTy->isStr()) return cache(false);
+
+    std::vector<const Expr*> retVals;
+    collectRetVals(fd->body, retVals);
+
+    std::function<bool(const Expr*)> isAllocExpr = [&](const Expr* rv) -> bool {
+        if (!rv) return false;
+        if (rv->template is<IdentExpr>())     return true;
+        if (rv->template is<StringLitExpr>()) return false;
+        if (rv->template is<TernaryExpr>()) {
+            auto& t = rv->template as<TernaryExpr>();
+            return isAllocExpr(t.thenExpr.get()) || isAllocExpr(t.elseExpr.get());
+        }
+        return true;
+    };
+
+    bool anyAllocating = false;
+    for (auto* rv : retVals) {
+        if (isAllocExpr(rv)) { anyAllocating = true; break; }
+    }
+    return cache(anyAllocating);
+}
+

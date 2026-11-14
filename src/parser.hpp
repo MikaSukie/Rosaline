@@ -72,6 +72,9 @@ private:
     std::vector<TypecaseArm> parseTypecaseArms();
     std::unique_ptr<ExternDecl> parseExternDecl();
     bool isTypeStart(int offset = 0) const;
+    bool atRetOwnMarker() const;
+    bool atReservedWord() const;
+    void reportReservedWord();
     bool isGenericTypeName(const std::string& name) const;
     bool looksLikeGenericCall() const;
 

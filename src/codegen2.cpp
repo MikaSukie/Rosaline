@@ -1,3 +1,4 @@
+#include <set>
 #include "codegen.hpp"
 #include <cstring>
 
@@ -483,7 +484,30 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                         if (hctx != currentSubst_.end())
                             return hctx->second;
                     }
-                    return it->second.retType;
+
+                    SubstMap callSubst = currentSubst_;
+                    for (size_t i = 0; i < x.typeArgs.size() &&
+                                    i < it->second.genericParams.size(); ++i) {
+                        callSubst[it->second.genericParams[i]] =
+                            sema_.resolveType(*x.typeArgs[i], currentSubst_);
+                    }
+                    for (size_t i = 0; i < x.args.size() &&
+                                    i < it->second.paramTypes.size(); ++i) {
+                        auto paramTy = it->second.paramTypes[i];
+                        if (!paramTy || !paramTy->isGeneric()) continue;
+                        const std::string& gp = paramTy->genericName;
+                        auto known = callSubst.find(gp);
+                        if (known != callSubst.end() && known->second &&
+                            !known->second->isGeneric())
+                            continue;
+                        auto argTy = exprType(*x.args[i]);
+                        if (argTy && !argTy->isGeneric() && !argTy->isError())
+                            callSubst[gp] = argTy;
+                    }
+
+                    auto retTy = applySubst(it->second.retType, callSubst);
+                    if (retTy && retTy->isGeneric()) return Ty::Void();
+                    return retTy ? retTy : Ty::Void();
                 }
             } else {
                 auto calleeTy = exprType(*x.callee);
@@ -508,6 +532,9 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
             } else {
                 rhsTy = exprType(*x.rhs);
             }
+            if (x.op == "-" && lhsTy && rhsTy &&
+                lhsTy->isPtr() && rhsTy->isPtr())
+                return Ty::I64();
             ResolvedTyPtr result = lhsTy ? lhsTy : Ty::I32();
             if (lhsTy && rhsTy) {
                 if (lhsTy->isFloat() && rhsTy->isFloat() &&
@@ -581,10 +608,16 @@ ResolvedTyPtr CodeGen::exprType(const Expr& e) const {
                 auto fit = sema_.funcs().find(name);
                 if (fit != sema_.funcs().end()) {
                     std::vector<ResolvedTyPtr> pts;
-                    if (fit->second.decl)
+                    if (fit->second.decl) {
                         for (auto& p : fit->second.decl->params)
                             if (p.type) pts.push_back(sema_.resolveType(*p.type, currentSubst_));
-                    return Ty::FuncPtr(std::move(pts), fit->second.retType);
+                    } else {
+                        pts = fit->second.paramTypes;
+                    }
+                    RetOwn own = RetOwn::Unspecified;
+                    if (fit->second.retType && fit->second.retType->isStr())
+                        own = funcAlwaysAllocatesStr(name) ? RetOwn::Owned : RetOwn::Borrowed;
+                    return Ty::FuncPtr(std::move(pts), fit->second.retType, own);
                 }
             }
             return Ty::Ptr(exprType(*x.operand));
@@ -634,6 +667,7 @@ std::string CodeGen::allocaFor(const std::string& name, const ResolvedTyPtr& ty)
     }
     varAlloca_[name] = ptr;
     varTypes_[name]  = ty;
+    ownFlag_.erase(name);
     return ptr;
 }
 
@@ -830,6 +864,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     breakLabels_.clear();
     contLabels_.clear();
     dropScopes_.clear();
+    ownFlag_.clear();
     loopDropDepths_.clear();
     blockTerminated_ = false;
     currentSubst_    = subst;
@@ -860,6 +895,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     hoistedAllocas_.clear();
     hoistAllocas_ = true;
 
+    std::vector<std::pair<std::string, ResolvedTyPtr>> strParams;
     for (auto& p : fd.params) {
         ResolvedTyPtr pty;
         if (fd.isMain) {
@@ -871,6 +907,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
             pty = sema_.resolveType(*p.type, subst);
         }
         bool isAgg = pty && (pty->isStruct() || pty->isEnum());
+        if (!isAgg && pty && pty->isStr()) strParams.push_back({p.name, pty});
         if (isAgg) {
             bool packed = false;
             if (pty->isStruct()) {
@@ -894,6 +931,7 @@ void CodeGen::emitFunc(const FuncDecl& fd, const SubstMap& subst,
     }
 
     pushDropScope();
+    for (auto& sp : strParams) registerFlaggedStr(sp.first, sp.second);
 
     if (fd.isMain) {
         if (hasGlobalFini_ && !raw_)
@@ -937,8 +975,13 @@ void CodeGen::emitStmt(const Stmt& s) {
         else if constexpr (std::is_same_v<T, ExprStmt>) {
             bool saved = usedAsValue_;
             usedAsValue_ = !x.expr->template is<CallExpr>();
-            emitExpr(*x.expr);
+            std::string discarded = emitExpr(*x.expr);
             usedAsValue_ = saved;
+            if (x.expr->template is<CallExpr>()) {
+                auto dty = exprType(*x.expr);
+                if (dty && dty->isStr() && isOwnedInit(x.expr.get()))
+                    emitStrFree(discarded);
+            }
         }
         else if constexpr (std::is_same_v<T, ReturnStmt>) emitReturn(x, curRetTy_);
         else if constexpr (std::is_same_v<T, IfStmt>)    emitIf(x);
@@ -1034,6 +1077,8 @@ void CodeGen::emitVarDecl(const VarDeclStmt& vd, const SourceLoc& loc) {
             ((ty->isStr() && (isOwnedInit(vd.init.get()) || !vd.init)) ||
              (ty->isPtr() && isOwnedInit(vd.init.get())))) {
             addToDropScope(effectiveName, ty, DropKind::OwnedStr);
+        } else if (!vd.nomd && !isDiscard && ty->isStr()) {
+            registerFlaggedStr(effectiveName, ty);
         } else if (ty->isEnum() &&
                    enumHasDroppablePayload(ty->name, ty->typeArgs)) {
             if (vd.init) {
@@ -1262,6 +1307,85 @@ void CodeGen::emitWhile(const WhileStmt& s) {
     contLabels_.pop_back();
 }
 
+std::string CodeGen::emitOwnedStrValue(const Expr& e) {
+    if (e.template is<TernaryExpr>()) {
+        auto& t = e.template as<TernaryExpr>();
+
+        std::string condVal = emitExpr(*t.cond);
+        auto condTy = exprType(*t.cond);
+        std::string cond1;
+        if (condTy && condTy->kind == TyKind::Bool) {
+            cond1 = condVal;
+        } else {
+            cond1 = newTmp();
+            line("  " + cond1 + " = icmp ne " + llvmTy(condTy) + " " + condVal + ", 0");
+        }
+
+        std::string slot    = newTmp() + ".ownt";
+        std::string thenLbl = newLabel();
+        std::string elseLbl = newLabel();
+        std::string mergeLbl = newLabel();
+        line("  " + slot + " = alloca ptr, align 8");
+        line("  br i1 " + cond1 + ", label %" + thenLbl + ", label %" + elseLbl);
+
+        line(thenLbl + ":");
+        std::string tv = emitOwnedStrValue(*t.thenExpr);
+        line("  store ptr " + tv + ", ptr " + slot + ", align 8");
+        line("  br label %" + mergeLbl);
+
+        line(elseLbl + ":");
+        std::string ev = emitOwnedStrValue(*t.elseExpr);
+        line("  store ptr " + ev + ", ptr " + slot + ", align 8");
+        line("  br label %" + mergeLbl);
+
+        line(mergeLbl + ":");
+        std::string res = newTmp();
+        line("  " + res + " = load ptr, ptr " + slot + ", align 8");
+        return res;
+    }
+
+    std::string v = emitExpr(e);
+    if (e.template is<StringLitExpr>() || e.template is<IdentExpr>())
+        return emitOwnedStrCopy(v);
+    if (isOwnedInit(&e)) return v;
+
+    {
+        const Expr* inner = &e;
+        while (inner->template is<CastExpr>())
+            inner = inner->template as<CastExpr>().operand.get();
+        if (inner->template is<CallExpr>()) {
+            auto& c = inner->template as<CallExpr>();
+            bool untracked = true;
+            bool known = false, unsafeExt = false, markedBorrowed = false;
+            if (c.callee->template is<IdentExpr>()) {
+                const std::string& fname = c.callee->template as<IdentExpr>().name;
+                known = sema_.funcs().count(fname) > 0;
+                for (auto& ed : prog_.externs)
+                    if (ed->name == fname) {
+                        known = true;
+                        unsafeExt = ed->isUnsafe;
+                        markedBorrowed = ed->retOwn == RetOwn::Borrowed;
+                    }
+            }
+            if (!known) {
+                auto ct = exprType(*c.callee);
+                markedBorrowed = ct && ct->isFuncPtr() && ct->funcRetOwn == RetOwn::Borrowed;
+            }
+            untracked = !markedBorrowed && (!known || unsafeExt);
+            static std::set<std::string> warned;
+            std::string key = e.loc.file + ":" + std::to_string(e.loc.line) + ":" +
+                              std::to_string(e.loc.col);
+            if (untracked && warned.insert(key).second)
+                diag_.warning(e.loc,
+                    "this returned 'str' comes from a call whose ownership the compiler "
+                    "cannot track (function pointer or 'unsafe extern'); the caller gets a "
+                    "copy, so if the callee returned a heap buffer that original buffer "
+                    "is not freed");
+        }
+    }
+    return emitOwnedStrCopy(v);
+}
+
 void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
     if (!s.value) {
         emitAllDropsExcept();
@@ -1278,18 +1402,63 @@ void CodeGen::emitReturn(const ReturnStmt& s, const ResolvedTyPtr& retTy) {
         return;
     }
 
-    std::string val = emitExpr(*s.value);
+    const bool ownedStrRet = retTy->isStr() && curSretPtr_.empty() &&
+                             funcAlwaysAllocatesStr(curFuncOrigName_);
+    const bool identOrLit  = s.value->template is<IdentExpr>() ||
+                             s.value->template is<StringLitExpr>();
+    std::string val = (ownedStrRet && !identOrLit)
+                          ? emitOwnedStrValue(*s.value)
+                          : emitExpr(*s.value);
     std::string skipDrop;
     if (s.value->template is<IdentExpr>()) {
         const std::string& rname = s.value->template as<IdentExpr>().name;
         for (auto& frame : dropScopes_) {
             for (auto& de : frame) {
-                if (de.varName == rname && de.kind == DropKind::OwnedStr) {
+                if (de.varName == rname && (de.kind == DropKind::OwnedStr ||
+                                            de.kind == DropKind::FlaggedStr)) {
                     skipDrop = rname;
                     break;
                 }
             }
             if (!skipDrop.empty()) break;
+        }
+    }
+
+    if (retTy->isStr() && curSretPtr_.empty() &&
+        funcAlwaysAllocatesStr(curFuncOrigName_)) {
+        if (s.value->template is<StringLitExpr>()) {
+            val = emitOwnedStrCopy(val);
+        } else if (s.value->template is<IdentExpr>()) {
+            const std::string& rname = s.value->template as<IdentExpr>().name;
+            bool staticOwned = false, flaggedLocal = false;
+            for (auto& frame : dropScopes_)
+                for (auto& de : frame)
+                    if (de.varName == rname) {
+                        if (de.kind == DropKind::OwnedStr)   staticOwned  = true;
+                        if (de.kind == DropKind::FlaggedStr) flaggedLocal = true;
+                    }
+            if (staticOwned) {
+            } else if (flaggedLocal && isFlaggedStr(rname)) {
+                std::string slot = newTmp() + ".rs";
+                std::string fl   = newTmp();
+                std::string keepLbl = newLabel();
+                std::string cpyLbl  = newLabel();
+                line("  " + slot + " = alloca ptr, align 8");
+                line("  store ptr " + val + ", ptr " + slot + ", align 8");
+                line("  " + fl + " = load i1, ptr " + ownFlag_.at(rname));
+                line("  br i1 " + fl + ", label %" + keepLbl + ", label %" + cpyLbl);
+                line(cpyLbl + ":");
+                std::string c = emitOwnedStrCopy(val);
+                line("  store ptr " + c + ", ptr " + slot + ", align 8");
+                line("  br label %" + keepLbl);
+                line(keepLbl + ":");
+                std::string kept = newTmp();
+                line("  " + kept + " = load ptr, ptr " + slot + ", align 8");
+                val = kept;
+                skipDrop = rname;
+            } else {
+                val = emitOwnedStrCopy(val);
+            }
         }
     }
 
@@ -2004,8 +2173,11 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
     bool rhsIsOwned = rhsIsOwnedInit || rhsIsMovedIdent;
     bool lhsWasOwned = a.lhs->template is<IdentExpr>() &&
         alreadyTrackedOwned(a.lhs->template as<IdentExpr>().name);
+    bool lhsFlagged = a.op == "=" && lty && lty->isStr() &&
+        a.lhs->template is<IdentExpr>() &&
+        isFlaggedStr(a.lhs->template as<IdentExpr>().name);
 
-    if (a.op == "=" && lty && (lty->isStr() || lty->isPtr()) && rhsIsOwned) {
+    if (a.op == "=" && lty && (lty->isStr() || lty->isPtr()) && rhsIsOwned && !lhsFlagged) {
         if (a.lhs->template is<IdentExpr>()) {
             const std::string& name = a.lhs->template as<IdentExpr>().name;
             bool isGlobalVar = isGlobalSymbol(name);
@@ -2047,7 +2219,10 @@ std::string CodeGen::emitAssign(const AssignExpr& a, const SourceLoc& loc) {
 
     if (a.lhs->template is<IdentExpr>()) {
         const std::string& name = a.lhs->template as<IdentExpr>().name;
-        storeVar(name, rval, lty, rhsIsOwned, lhsWasOwned || isGlobalSymbol(name));
+        if (lhsFlagged)
+            emitFlaggedStrAssign(name, rval, rhsIsOwned);
+        else
+            storeVar(name, rval, lty, rhsIsOwned, lhsWasOwned || isGlobalSymbol(name));
     } else if (isAggTy(lty)) {
         emitAggrCopy(lptr, rval, lty);
     } else {
@@ -2099,6 +2274,39 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
 
     auto ctxIt = currentSubst_.find("#ctx");
     ResolvedTyPtr ctxTyBin = (ctxIt != currentSubst_.end()) ? ctxIt->second : nullptr;
+
+    auto checkLty = exprType(*b.lhs);
+    SubstMap savedCheckCtx = currentSubst_;
+    if (checkLty && (checkLty->isInteger() || checkLty->isFloat()))
+        currentSubst_["#ctx"] = checkLty;
+    auto checkRty = exprType(*b.rhs);
+    currentSubst_ = savedCheckCtx;
+
+    const bool hasConcreteOperands = checkLty && checkRty &&
+        !checkLty->isGeneric() && !checkRty->isGeneric() &&
+        !checkLty->isError() && !checkRty->isError();
+    if (hasConcreteOperands) {
+        const bool numericPair = checkLty->isNumeric() && checkRty->isNumeric();
+        const bool pointerIndex = checkLty->isPtr() && checkRty->isInteger();
+        const bool pointerDifference = checkLty->isPtr() && checkRty->isPtr() &&
+                                       checkLty->equals(*checkRty);
+        const bool stringPair = checkLty->isStr() && checkRty->isStr();
+        const bool integerPair = checkLty->isInteger() && checkRty->isInteger();
+        bool valid = true;
+        if (b.op == "+") valid = numericPair || pointerIndex || stringPair;
+        else if (b.op == "-") valid = numericPair || pointerIndex || pointerDifference;
+        else if (b.op == "*" || b.op == "/" || b.op == "%") valid = numericPair;
+        else if (b.op == "&" || b.op == "|" || b.op == "^" ||
+                 b.op == "<<" || b.op == ">>") valid = integerPair;
+
+        if (!valid) {
+            diag_.error(loc,
+                std::format("operator '{}' is not defined for operand types '{}' and '{}'",
+                            b.op, checkLty->str(), checkRty->str()),
+                lineFor(loc));
+            return "undef";
+        }
+    }
 
     std::string lv = emitExpr(*b.lhs);
     auto lty = exprType(*b.lhs);
@@ -2176,6 +2384,7 @@ std::string CodeGen::emitBinOp(const BinOpExpr& b, const SourceLoc& loc) {
                 auto ty2 = exprType(expr);
                 if (!ty2 || !ty2->isStr()) return false;
                 auto& c2 = expr.template as<CallExpr>();
+                if (fnPtrCallOwnsStr(c2)) return true;
                 if (!c2.callee->template is<IdentExpr>()) return false;
                 const std::string& fn =
                     c2.callee->template as<IdentExpr>().name;
@@ -2618,6 +2827,61 @@ std::string CodeGen::emitIndex(const IndexExpr& ix, const SourceLoc& loc) {
     return ev;
 }
 
+std::string CodeGen::emitIndirectCall(const std::string& fptr,
+                                      const ResolvedTyPtr& fpty,
+                                      const CallExpr& c) {
+    std::vector<std::string> argVals, argTys;
+    for (auto& a : c.args) {
+        auto aty = exprType(*a);
+        std::string v = emitExpr(*a);
+        bool isAgg = aty && (aty->isStruct() || aty->isEnum());
+        argVals.push_back(v);
+        argTys.push_back(isAgg ? "ptr" : (aty ? llvmTy(aty) : "i32"));
+    }
+
+    ResolvedTyPtr retTy;
+    if (fpty && fpty->isFuncPtr())
+        retTy = fpty->funcRetType ? fpty->funcRetType : Ty::Void();
+    std::string retLLVM = retTy ? llvmTy(retTy) : "i32";
+    const bool aggRet = retTy && isAggTy(retTy);
+
+    std::string sigParams, args;
+    std::string sretBuf;
+    if (aggRet) {
+        ensureTypeEmitted(retTy, currentSubst_);
+        bool packed = false;
+        if (retTy->isStruct()) {
+            auto sit = sema_.structs().find(retTy->name);
+            if (sit != sema_.structs().end()) packed = sit->second->packed;
+        }
+        int align = validAlign(llvmByteSize(retTy), packed);
+        sretBuf = newTmp() + ".sret";
+        line("  " + sretBuf + " = alloca " + llvmTy(retTy) +
+             ", align " + std::to_string(align));
+        sigParams = "ptr";
+        args      = "ptr sret(" + llvmTy(retTy) + ") " + sretBuf;
+    }
+    for (size_t i = 0; i < argVals.size(); ++i) {
+        if (!sigParams.empty()) { sigParams += ", "; args += ", "; }
+        sigParams += argTys[i];
+        args      += argTys[i] + " " + argVals[i];
+    }
+    const std::string fnSig = (aggRet ? std::string("void") : retLLVM) +
+                              " (" + sigParams + ")";
+
+    if (aggRet) {
+        line("  call " + fnSig + " " + fptr + "(" + args + ")");
+        return sretBuf;
+    }
+    if (retLLVM == "void") {
+        line("  call " + fnSig + " " + fptr + "(" + args + ")");
+        return "0";
+    }
+    std::string tmp = newTmp();
+    line("  " + tmp + " = call " + fnSig + " " + fptr + "(" + args + ")");
+    return tmp;
+}
+
 std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     std::string fname;
     if (c.callee->template is<IdentExpr>())
@@ -2625,39 +2889,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     else {
         auto calleeTy = exprType(*c.callee);
         std::string fptr = emitExpr(*c.callee);
-
-        std::vector<std::string> argVals;
-        std::vector<std::string> argTys;
-        for (auto& a : c.args) {
-            argVals.push_back(emitExpr(*a));
-            auto aty = exprType(*a);
-            argTys.push_back(aty ? llvmTy(aty) : "i32");
-        }
-
-        std::string retLLVM = "i32";
-        if (calleeTy && calleeTy->isFuncPtr() && calleeTy->funcRetType)
-            retLLVM = llvmTy(calleeTy->funcRetType);
-
-        std::string fnSig = retLLVM + " (";
-        for (size_t i = 0; i < argTys.size(); ++i) {
-            if (i) fnSig += ", ";
-            fnSig += argTys[i];
-        }
-        fnSig += ")";
-
-        std::string args;
-        for (size_t i = 0; i < argVals.size(); ++i) {
-            if (i) args += ", ";
-            args += argTys[i] + " " + argVals[i];
-        }
-
-        if (retLLVM == "void") {
-            line("  call " + fnSig + " " + fptr + "(" + args + ")");
-            return "0";
-        }
-        std::string tmp = newTmp();
-        line("  " + tmp + " = call " + fnSig + " " + fptr + "(" + args + ")");
-        return tmp;
+        return emitIndirectCall(fptr, calleeTy, c);
     }
 
     if (fname == "len") {
@@ -2698,32 +2930,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
 
             std::string fptr = newTmp();
             line("  " + fptr + " = load ptr, ptr " + vit->second);
-
-            std::vector<std::string> argVals, argTys;
-            for (auto& a : c.args) {
-                argVals.push_back(emitExpr(*a));
-                auto aty = exprType(*a);
-                argTys.push_back(aty ? llvmTy(aty) : "i32");
-            }
-
-            std::string retLLVM = fpty->funcRetType ? llvmTy(fpty->funcRetType) : "void";
-            std::string fnSig = retLLVM + " (";
-            for (size_t i = 0; i < argTys.size(); ++i) { if (i) fnSig += ", "; fnSig += argTys[i]; }
-            fnSig += ")";
-
-            std::string args;
-            for (size_t i = 0; i < argVals.size(); ++i) {
-                if (i) args += ", ";
-                args += argTys[i] + " " + argVals[i];
-            }
-
-            if (retLLVM == "void") {
-                line("  call " + fnSig + " " + fptr + "(" + args + ")");
-                return "0";
-            }
-            std::string tmp = newTmp();
-            line("  " + tmp + " = call " + fnSig + " " + fptr + "(" + args + ")");
-            return tmp;
+            return emitIndirectCall(fptr, fpty, c);
         }
 
         if (permissive_) {
@@ -2790,10 +2997,18 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
         ctxTy = it->second;
     }
 
+    std::unordered_map<std::string, ResolvedTyPtr> explicitMap;
+    for (size_t i = 0; i < c.typeArgs.size() &&
+                    i < fit->second.genericParams.size(); ++i) {
+        explicitMap[fit->second.genericParams[i]] =
+            sema_.resolveType(*c.typeArgs[i], currentSubst_);
+    }
+
     std::unordered_map<std::string, ResolvedTyPtr> inferMap;
     for (size_t i = 0; i < c.args.size() && i < fit->second.paramTypes.size(); ++i) {
         auto prmTy = fit->second.paramTypes[i];
         if (!prmTy || !prmTy->isGeneric()) continue;
+        if (explicitMap.count(prmTy->genericName)) continue;
         auto argTy = exprType(*c.args[i]);
         if (argTy && !argTy->isGeneric())
             inferMap[prmTy->genericName] = argTy;
@@ -2803,6 +3018,12 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     for (auto& gp : fit->second.genericParams) {
         if (gp == "#ctx") {
             typeArgs.push_back(ctxTy);
+            continue;
+        }
+
+        auto eit = explicitMap.find(gp);
+        if (eit != explicitMap.end() && eit->second && !eit->second->isGeneric()) {
+            typeArgs.push_back(eit->second);
             continue;
         }
 
@@ -2834,6 +3055,10 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
         }
     }
 
+    SubstMap concreteCallSubst = currentSubst_;
+    for (size_t i = 0; i < fit->second.genericParams.size() && i < typeArgs.size(); ++i)
+        concreteCallSubst[fit->second.genericParams[i]] = typeArgs[i];
+
     enum class TransientKind { None, Str };
 
     struct ArgInfo {
@@ -2854,6 +3079,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
             auto ty2 = exprType(e);
             if (!ty2 || !ty2->isStr()) return false;
             auto& c2 = e.template as<CallExpr>();
+            if (fnPtrCallOwnsStr(c2)) return true;
             if (!c2.callee->template is<IdentExpr>()) return false;
             const std::string& fn2 =
                 c2.callee->template as<IdentExpr>().name;
@@ -2893,7 +3119,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     for (size_t i = 0; i < c.args.size(); ++i) {
         ArgInfo ai;
         ResolvedTyPtr expectedTy = (i < fit->second.paramTypes.size())
-            ? applySubst(fit->second.paramTypes[i], currentSubst_)
+            ? applySubst(fit->second.paramTypes[i], concreteCallSubst)
             : nullptr;
 
         if (c.args[i]->template is<IntLitExpr>() &&
@@ -3012,14 +3238,7 @@ std::string CodeGen::emitCall(const CallExpr& c, const SourceLoc& loc) {
     if (fit->second.decl && fit->second.decl->retType && fit->second.decl->retType->isHash()) {
         retTy = ctxTy;
     } else {
-        SubstMap callSubst = currentSubst_;
-        size_t ti = 0;
-        for (auto& gp : fit->second.genericParams) {
-            if (gp == "#ctx") continue;
-            if (ti < typeArgs.size())
-                callSubst[gp] = typeArgs[ti++];
-        }
-        retTy = applySubst(fit->second.retType, callSubst);
+        retTy = applySubst(fit->second.retType, concreteCallSubst);
         if (retTy && retTy->isGeneric()) retTy = Ty::Void();
     }
 
@@ -3384,7 +3603,7 @@ void CodeGen::addToDropScope(const std::string& name,
                               const ResolvedTyPtr& ty,
                               DropKind kind) {
     if (dropScopes_.empty()) return;
-    dropScopes_.back().push_back({name, ty, kind});
+    dropScopes_.back().push_back({name, ty, kind, {}, {}});
 }
 
 void CodeGen::emitAllDropsExcept(const std::string& skipVar) {
@@ -3429,7 +3648,78 @@ void CodeGen::emitDropEntry(const DropEntry& de) {
     case DropKind::EnumWithStrPayload:
         emitEnumPayloadDrop(de.varName, de.ty);
         break;
+    case DropKind::FlaggedStr: {
+        std::string flag = newTmp();
+        std::string yesLbl = newLabel();
+        std::string endLbl = newLabel();
+        line("  " + flag + " = load i1, ptr " + de.flagPtr);
+        line("  br i1 " + flag + ", label %" + yesLbl + ", label %" + endLbl);
+        line(yesLbl + ":");
+        std::string ptr = newTmp();
+        line("  " + ptr + " = load ptr, ptr " + de.storagePtr + ", align 8");
+        emitStrFree(ptr);
+        line("  store ptr null, ptr " + de.storagePtr + ", align 8");
+        line("  store i1 false, ptr " + de.flagPtr);
+        line("  br label %" + endLbl);
+        line(endLbl + ":");
+        break;
     }
+    }
+}
+
+std::string CodeGen::makeOwnFlag() {
+    std::string ptr = "%own." + std::to_string(tmpIdx_++);
+    line("  " + ptr + " = alloca i1, align 1");
+    if (hoistAllocas_)
+        hoistedAllocas_.push_back("  store i1 false, ptr " + ptr);
+    else
+        line("  store i1 false, ptr " + ptr);
+    return ptr;
+}
+
+void CodeGen::registerFlaggedStr(const std::string& name,
+                                 const ResolvedTyPtr& ty) {
+    if (dropScopes_.empty()) return;
+    auto ait = varAlloca_.find(name);
+    if (ait == varAlloca_.end()) return;
+    std::string flag = makeOwnFlag();
+    line("  store i1 false, ptr " + flag);
+    ownFlag_[name] = flag;
+    dropScopes_.back().push_back(
+        {name, ty, DropKind::FlaggedStr, flag, ait->second});
+}
+
+bool CodeGen::isFlaggedStr(const std::string& name) const {
+    return !isGlobalSymbol(name) && varAlloca_.count(name) &&
+           ownFlag_.count(name);
+}
+
+void CodeGen::emitFlaggedStrAssign(const std::string& name,
+                                   const std::string& val, bool valOwned) {
+    const std::string& flag    = ownFlag_.at(name);
+    const std::string& storage = varAlloca_.at(name);
+
+    std::string old     = newTmp();
+    std::string same    = newTmp();
+    std::string owned   = newTmp();
+    std::string contLbl = newLabel();
+    std::string yesLbl  = newLabel();
+    std::string storeLbl = newLabel();
+    std::string doneLbl = newLabel();
+    line("  " + old + " = load ptr, ptr " + storage + ", align 8");
+    line("  " + same + " = icmp eq ptr " + old + ", " + val);
+    line("  br i1 " + same + ", label %" + doneLbl + ", label %" + contLbl);
+    line(contLbl + ":");
+    line("  " + owned + " = load i1, ptr " + flag);
+    line("  br i1 " + owned + ", label %" + yesLbl + ", label %" + storeLbl);
+    line(yesLbl + ":");
+    emitStrFree(old);
+    line("  br label %" + storeLbl);
+    line(storeLbl + ":");
+    line("  store ptr " + val + ", ptr " + storage + ", align 8");
+    line(std::string("  store i1 ") + (valOwned ? "true" : "false") + ", ptr " + flag);
+    line("  br label %" + doneLbl);
+    line(doneLbl + ":");
 }
 
 void CodeGen::emitStrFree(const std::string& llvmPtr) {
@@ -3559,77 +3849,20 @@ void CodeGen::emitEnumPayloadDrop(const std::string& varName,
     line(dropEndLbl + ":");
 }
 
-static void collectRetVals(const std::vector<StmtPtr>& stmts,
-                            std::vector<const Expr*>& out) {
-    for (auto& s : stmts) {
-        std::visit([&](auto& x) {
-            using T = std::decay_t<decltype(x)>;
-            if constexpr (std::is_same_v<T, ReturnStmt>) {
-                if (x.value) out.push_back(x.value.get());
-            } else if constexpr (std::is_same_v<T, IfStmt>) {
-                collectRetVals(x.thenBody, out);
-                collectRetVals(x.elseBody, out);
-            } else if constexpr (std::is_same_v<T, WhileStmt>) {
-                collectRetVals(x.body, out);
-            } else if constexpr (std::is_same_v<T, BlockStmt>) {
-                collectRetVals(x.stmts, out);
-            } else if constexpr (std::is_same_v<T, ExprStmt>) {
-                if (!x.expr) return;
-                if (x.expr->template is<TypeswitchExpr>()) {
-                    for (auto& arm : x.expr->template as<TypeswitchExpr>().arms)
-                        collectRetVals(arm.body, out);
-                } else if (x.expr->template is<MatchExpr>()) {
-                    for (auto& arm : x.expr->template as<MatchExpr>().arms)
-                        collectRetVals(arm.body, out);
-                }
-            }
-        }, s->v);
-    }
+bool CodeGen::funcAlwaysAllocatesStr(const std::string& fname) const {
+    return sema_.funcAlwaysAllocatesStr(fname);
 }
 
-bool CodeGen::funcAlwaysAllocatesStr(const std::string& fname) const {
-    auto cit = strAllocCache_.find(fname);
-    if (cit != strAllocCache_.end()) return cit->second;
-
-    auto cache = [&](bool v) -> bool {
-        strAllocCache_[fname] = v;
-        return v;
-    };
-
-    for (auto& ed : prog_.externs) {
-        if (ed->name != fname) continue;
-        if (ed->isUnsafe) return cache(false);
-        if (!ed->retType) return cache(false);
-        auto rt = sema_.resolveType(*ed->retType);
-        return cache(rt && rt->isStr());
+bool CodeGen::fnPtrCallOwnsStr(const CallExpr& c) const {
+    if (c.callee->template is<IdentExpr>()) {
+        const std::string& name = c.callee->template as<IdentExpr>().name;
+        if (sema_.funcs().count(name)) return false;
+        for (auto& ed : prog_.externs)
+            if (ed->name == name) return false;
     }
-
-    const FuncDecl* fd = prog_.findFunc(fname);
-    if (!fd) return cache(false);
-
-    if (!fd->retType || fd->retType->isHash()) return cache(false);
-    auto retTy = sema_.resolveType(*fd->retType);
-    if (!retTy || !retTy->isStr()) return cache(false);
-
-    std::vector<const Expr*> retVals;
-    collectRetVals(fd->body, retVals);
-
-    std::function<bool(const Expr*)> isAllocExpr = [&](const Expr* rv) -> bool {
-        if (!rv) return false;
-        if (rv->template is<IdentExpr>())     return false;
-        if (rv->template is<StringLitExpr>()) return false;
-        if (rv->template is<TernaryExpr>()) {
-            auto& t = rv->template as<TernaryExpr>();
-            return isAllocExpr(t.thenExpr.get()) || isAllocExpr(t.elseExpr.get());
-        }
-        return true;
-    };
-
-    bool anyAllocating = false;
-    for (auto* rv : retVals) {
-        if (isAllocExpr(rv)) { anyAllocating = true; break; }
-    }
-    return cache(anyAllocating);
+    auto ct = exprType(*c.callee);
+    return ct && ct->isFuncPtr() && ct->funcRetOwn == RetOwn::Owned &&
+           ct->funcRetType && ct->funcRetType->isStr();
 }
 
 bool CodeGen::isOwnedInit(const Expr* init) const {
@@ -3650,11 +3883,13 @@ bool CodeGen::isOwnedInit(const Expr* init) const {
 
     if (init->template is<CallExpr>()) {
         auto& c = init->template as<CallExpr>();
+        if (fnPtrCallOwnsStr(c)) return true;
         if (c.callee->template is<IdentExpr>()) {
             const std::string& fname =
                 c.callee->template as<IdentExpr>().name;
             for (auto& ed : prog_.externs) {
-                if (ed->name == fname && ed->isUnsafe)
+                if (ed->name == fname && ed->isUnsafe &&
+                    ed->retOwn != RetOwn::Owned)
                     return false;
             }
 

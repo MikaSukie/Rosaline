@@ -34,6 +34,7 @@ struct ResolvedTy {
     std::string   genericName;
     std::vector<ResolvedTyPtr> funcParamTypes;
     ResolvedTyPtr              funcRetType;
+    RetOwn                     funcRetOwn = RetOwn::Unspecified;
 
     bool isInteger() const {
         return kind == TyKind::I8   || kind == TyKind::I16  ||
@@ -156,10 +157,12 @@ namespace Ty {
         return t;
     }
     inline ResolvedTyPtr Error() { return make(TyKind::Error); }
-    inline ResolvedTyPtr FuncPtr(std::vector<ResolvedTyPtr> paramTys, ResolvedTyPtr retTy) {
+    inline ResolvedTyPtr FuncPtr(std::vector<ResolvedTyPtr> paramTys, ResolvedTyPtr retTy,
+                                 RetOwn retOwn = RetOwn::Unspecified) {
         auto t = make(TyKind::FuncPtr);
         t->funcParamTypes = std::move(paramTys);
         t->funcRetType    = std::move(retTy);
+        t->funcRetOwn     = retOwn;
         return t;
     }
 }

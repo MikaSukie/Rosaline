@@ -123,6 +123,8 @@ public:
 
     ResolvedTyPtr resolveType(const TypeNode& tn, const SubstMap& subst = {}) const;
 
+    bool funcAlwaysAllocatesStr(const std::string& fname) const;
+
 private:
     Program&    prog_;
     DiagEngine& diag_;
@@ -132,6 +134,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<StructTypeInfo>> structs_;
     std::unordered_map<std::string, std::shared_ptr<EnumTypeInfo>>   enums_;
     std::unordered_map<std::string, FuncSig>                         funcs_;
+    mutable std::unordered_map<std::string, bool>                    strAllocCache_;
 
     std::unique_ptr<TypeResolver> tyResolver_;
 

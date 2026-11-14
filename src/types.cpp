@@ -78,6 +78,8 @@ std::string ResolvedTy::str() const {
                 s += funcParamTypes[i] ? funcParamTypes[i]->str() : "?";
             }
             s += ")->";
+            if (funcRetOwn == RetOwn::Owned)    s += "owned ";
+            if (funcRetOwn == RetOwn::Borrowed) s += "borrowed ";
             s += funcRetType ? funcRetType->str() : "void";
             return s;
         }
@@ -122,6 +124,8 @@ std::string ResolvedTy::mangle() const {
         case TyKind::FuncPtr: {
             std::string s = "fn";
             for (auto& pt : funcParamTypes) s += "_" + (pt ? pt->mangle() : "void");
+            if (funcRetOwn == RetOwn::Owned)    s += "_own";
+            if (funcRetOwn == RetOwn::Borrowed) s += "_bor";
             s += "_r" + (funcRetType ? funcRetType->mangle() : "void");
             return s;
         }
@@ -196,6 +200,8 @@ bool ResolvedTy::equals(const ResolvedTy& o) const {
                 if (!funcParamTypes[i] || !o.funcParamTypes[i]) return false;
                 if (!funcParamTypes[i]->equals(*o.funcParamTypes[i])) return false;
             }
+            if (o.funcRetOwn == RetOwn::Owned && funcRetOwn != RetOwn::Owned) return false;
+            if (o.funcRetOwn == RetOwn::Borrowed && funcRetOwn == RetOwn::Owned) return false;
             if (!funcRetType || !o.funcRetType) return funcRetType == o.funcRetType;
             return funcRetType->equals(*o.funcRetType);
         }
@@ -245,7 +251,7 @@ ResolvedTyPtr applySubst(const ResolvedTyPtr& ty, const SubstMap& subst) {
         auto newRet = ty->funcRetType ? applySubst(ty->funcRetType, subst) : ty->funcRetType;
         if (newRet != ty->funcRetType) changed = true;
         if (!changed) return ty;
-        return Ty::FuncPtr(std::move(newParams), newRet);
+        return Ty::FuncPtr(std::move(newParams), newRet, ty->funcRetOwn);
     }
     return ty;
 }
@@ -286,7 +292,13 @@ ResolvedTyPtr TypeResolver::resolve(const TypeNode& tn, const SubstMap& subst) c
             for (auto& pt : x.paramTypes)
                 paramTys.push_back(pt ? resolve(*pt, subst) : Ty::Void());
             auto retTy = x.retType ? resolve(*x.retType, subst) : Ty::Void();
-            return Ty::FuncPtr(std::move(paramTys), retTy);
+            if (x.retOwn != RetOwn::Unspecified && !retTy->isStr() && !retTy->isError()) {
+                diag_.error(tn.loc,
+                    "'owned'/'borrowed' applies only to a function type that returns 'str'",
+                    lineFor(tn.loc));
+                return Ty::FuncPtr(std::move(paramTys), retTy);
+            }
+            return Ty::FuncPtr(std::move(paramTys), retTy, x.retOwn);
         }
 
         if constexpr (std::is_same_v<T, PtrType>) {

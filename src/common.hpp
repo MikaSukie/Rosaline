@@ -25,6 +25,8 @@ struct SourceLoc {
     int         len  = 1;
 };
 
+enum class RetOwn : uint8_t { Unspecified, Owned, Borrowed };
+
 enum class DiagLevel { Error, Warning, Note };
 
 struct Diagnostic {
